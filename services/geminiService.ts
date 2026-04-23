@@ -1,0 +1,387 @@
+
+import { AppConfig } from "../types";
+import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY } from "../prompts";
+
+export class AiService {
+  // Safe chunk size to avoid context limits (approx 3000 chars)
+  private CHUNK_SIZE = 3000;
+  private config: AppConfig;
+
+  constructor(config: AppConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Helper to retry operations with exponential backoff.
+   */
+  private async retry<T>(
+    operation: () => Promise<T>, 
+    retries: number = 3, 
+    delay: number = 2000
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error: any) {
+      if (retries <= 0) {
+          throw error;
+      }
+      
+      const errString = String(error) + (typeof error === 'object' ? JSON.stringify(error) : '');
+      const isRateLimit = errString.includes('429');
+      const isAuthError = errString.includes('401') || errString.includes('403');
+
+      if (isAuthError) throw error; // Never retry auth errors
+
+      const isEmptyOrBadRequest = errString.includes('400') || errString.includes('empty response');
+      
+      // Allow exactly 1 retry for empty responses or 400 errors.
+      // Since default retries is 3, if retries <= 2, we've already retried once.
+      if (isEmptyOrBadRequest && retries <= 2) {
+          throw error;
+      }
+
+      let nextDelay = delay;
+
+      if (isRateLimit) {
+          nextDelay = Math.max(delay * 1.5, 5000);
+          console.warn(`Rate limit exceeded (429). Pausing for ${nextDelay}ms... (${retries} attempts left)`);
+      } else {
+          nextDelay = delay * 2;
+          console.warn(`API call failed. Retrying in ${nextDelay}ms... (${retries} attempts left).`, error);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, nextDelay));
+      return this.retry(operation, retries - 1, nextDelay);
+    }
+  }
+
+  /**
+   * Splits text into manageable chunks.
+   */
+  public splitTextIntoChunks(text: string): string[] {
+    if (!text || text.length <= this.CHUNK_SIZE) return [text];
+
+    const chunks: string[] = [];
+    let currentChunk = '';
+    
+    const paragraphs = text.split(/\n\n/);
+
+    for (const paragraph of paragraphs) {
+      if ((currentChunk.length + paragraph.length + 2) > this.CHUNK_SIZE) {
+        if (currentChunk) {
+          chunks.push(currentChunk);
+          currentChunk = '';
+        }
+
+        if (paragraph.length > this.CHUNK_SIZE) {
+           const lines = paragraph.split('\n');
+           let currentLineChunk = '';
+           
+           for (const line of lines) {
+             if ((currentLineChunk.length + line.length + 1) > this.CHUNK_SIZE) {
+                if (currentLineChunk) {
+                    chunks.push(currentLineChunk);
+                    currentLineChunk = '';
+                }
+                if (line.length > this.CHUNK_SIZE) {
+                    let remaining = line;
+                    while (remaining.length > 0) {
+                        chunks.push(remaining.substring(0, this.CHUNK_SIZE));
+                        remaining = remaining.substring(this.CHUNK_SIZE);
+                    }
+                } else {
+                    currentLineChunk = line;
+                }
+             } else {
+                currentLineChunk += (currentLineChunk ? '\n' : '') + line;
+             }
+           }
+           if (currentLineChunk) chunks.push(currentLineChunk);
+
+        } else {
+           currentChunk = paragraph;
+        }
+      } else {
+        currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+      }
+    }
+    
+    if (currentChunk) {
+      chunks.push(currentChunk);
+    }
+
+    return chunks;
+  }
+
+  /**
+   * Cleans the model output by removing thinking tags and conversational prefixes.
+   * Also extracts translation and glossary if they are wrapped in tags.
+   */
+  private parseResponse(text: string): { translation: string; glossary?: string } {
+    if (!text) return { translation: "" };
+
+    // 1. Remove <think> blocks
+    let clean = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+    // 2. Try to extract from <translation> and <glossary> tags
+    const translationMatch = clean.match(/<translation>([\s\S]*?)<\/translation>/i);
+    const glossaryMatch = clean.match(/<glossary>([\s\S]*?)<\/glossary>/i);
+
+    if (translationMatch) {
+      const translation = translationMatch[1].trim();
+      const glossary = glossaryMatch ? glossaryMatch[1].trim() : undefined;
+      return { translation, glossary };
+    }
+
+    // Fallback: original cleaning logic if tags are missing
+    const codeBlockRegex = /^```(?:markdown|md)?\n([\s\S]*?)\n```$/i;
+    const match = clean.match(codeBlockRegex);
+    if (match) {
+        clean = match[1].trim();
+    }
+
+    clean = clean.replace(/^(Here is the translation|Sure|Here is the translated content|Here is the proofread version)[^:\n]*:?\s*/i, '');
+
+    return { translation: clean.trim() };
+  }
+
+  /**
+   * Generic OpenAI-Compatible Chat Completion
+   */
+  private async generate(
+      prompt: string, 
+      systemInstruction: string, 
+      temperature: number = 0.3
+  ): Promise<{ translation: string; glossary?: string }> {
+      const operation = async () => {
+        if (!this.config.apiKey) throw new Error("API Key is required.");
+        if (!this.config.baseUrl) throw new Error("Base URL is required.");
+
+        let url = `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+        
+        const body = {
+            model: this.config.modelName,
+            messages: [
+                { role: "system", content: systemInstruction },
+                { role: "user", content: prompt }
+            ],
+            temperature: temperature
+        };
+
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${this.config.apiKey}`
+            },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`API Error ${response.status}: ${errText}`);
+        }
+
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+
+        if (!content) {
+             throw new Error("Received empty response from API");
+        }
+        
+        return this.parseResponse(content);
+      };
+
+      return this.retry(operation);
+  }
+
+  /**
+   * Verifies the connection to the configured API.
+   */
+  async testConnection(): Promise<boolean> {
+      try {
+          const testPrompt = "Ping";
+          const testSystem = "Reply with 'Pong' only.";
+          const result = await this.generate(testPrompt, testSystem, 0.1);
+          return result.translation.toLowerCase().includes('pong') || result.translation.length > 0;
+      } catch (e: any) {
+          console.error("Connection Test Failed:", e);
+          throw e;
+      }
+  }
+
+  async translateContent(
+    content: string, 
+    targetLanguage: string, 
+    systemInstruction: string,
+    onProgress?: (current: number, total: number, chunkResult: string, updatedGlossary?: string, isFallback?: boolean) => Promise<void>,
+    existingChunks: string[] = [],
+    indicesToRetry: number[] = [],
+    initialGlossary: string = ""
+  ): Promise<{ content: string; glossary: string }> {
+    
+    const chunks = this.splitTextIntoChunks(content);
+    const translatedChunks: string[] = [...existingChunks];
+    const chunkGlossaries: string[] = [];
+
+    // Ensure array is large enough
+    while (translatedChunks.length < chunks.length) {
+        translatedChunks.push("");
+    }
+
+    let currentGlossary = initialGlossary;
+
+    const mergeGlossary = (base: string, delta: string) => {
+        const baseMap: Record<string, string> = {};
+        const parse = (s: string) => {
+            s.split('\n').forEach(line => {
+                // 1. Try structural format: SOURCE: xxx | TARGET: yyy
+                const structuralMatch = line.match(/SOURCE:\s*(.*?)\s*\|\s*TARGET:\s*(.*)/i);
+                if (structuralMatch) {
+                    const key = structuralMatch[1].trim();
+                    const value = structuralMatch[2].trim();
+                    if (key && value) {
+                        baseMap[key] = value;
+                        return;
+                    }
+                }
+
+                // 2. Fallback to simple format: Key: Value
+                const parts = line.split(':');
+                if (parts.length >= 2) {
+                    const k = parts[0].trim();
+                    const v = parts.slice(1).join(':').trim();
+                    if (k && v && !k.toLowerCase().includes('source') && !k.toLowerCase().includes('target')) {
+                        baseMap[k] = v;
+                    }
+                }
+            });
+        };
+        parse(base);
+        parse(delta);
+        return Object.entries(baseMap)
+            .sort()
+            .map(([k, v]) => `SOURCE: ${k} | TARGET: ${v}`)
+            .join('\n');
+    };
+
+    const baseSystemInstruction = `${systemInstruction}\n\n${TRANSLATION_PROMPT_NOTES}\n\n${TRANSLATION_PROMPT_GLOSSARY}\n\nIMPORTANT: Return results wrapped in <translation> and <glossary> tags as specified.`;
+
+    const translateChunk = async (i: number) => {
+        if (i > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        const chunk = chunks[i];
+        const glossaryPrompt = currentGlossary 
+            ? `\n\nCURRENT GLOSSARY:\n${currentGlossary}`
+            : "\n\nCURRENT GLOSSARY: (Empty)";
+
+        const chunkInstruction = chunks.length > 1
+            ? `${baseSystemInstruction}\n\n[System Note: This is part ${i + 1} of ${chunks.length} of the chapter. Maintain strict terminology and stylistic consistency with previous parts.]${glossaryPrompt}`
+            : `${baseSystemInstruction}${glossaryPrompt}`;
+
+        const prompt = `Translate the following Markdown content into ${targetLanguage}. \n\nCONTENT:\n${chunk}`;
+
+        try {
+            const result = await this.generate(prompt, chunkInstruction, 0.3);
+            translatedChunks[i] = result.translation;
+            const deltaGlossary = result.glossary || "";
+            if (deltaGlossary) {
+                currentGlossary = mergeGlossary(currentGlossary, deltaGlossary);
+            }
+            
+            if (onProgress) {
+                // We pass deltaGlossary to onProgress so UI/DB update can see the new terms
+                await onProgress(i + 1, chunks.length, result.translation, deltaGlossary);
+            }
+        } catch (error) {
+            console.error(`Error translating chunk ${i + 1}/${chunks.length}:`, error);
+            translatedChunks[i] = chunk;
+            if (onProgress) {
+                await onProgress(i + 1, chunks.length, chunk, "", true);
+            }
+        }
+    };
+
+    // 1. Resume from where we left off (sequential)
+    const startIndex = existingChunks.length > 0 ? existingChunks.findIndex(c => !c) : 0;
+    const start = startIndex === -1 ? existingChunks.length : startIndex;
+
+    for (let i = start; i < chunks.length; i++) {
+        // Only process if it's empty OR we haven't reached the end of existing chunks
+        if (i >= existingChunks.length || !existingChunks[i]) {
+            await translateChunk(i);
+        }
+    }
+
+    // 2. Explicit retries
+    for (const i of indicesToRetry) {
+        if (i < chunks.length) {
+            await translateChunk(i);
+        }
+    }
+
+    return { 
+        content: translatedChunks.join('\n\n'),
+        glossary: currentGlossary
+    };
+  }
+
+  async proofreadContent(
+    content: string, 
+    instruction: string,
+    onProgress?: (current: number, total: number, chunkResult: string, isFallback?: boolean) => Promise<void>,
+    existingChunks: string[] = [],
+    indicesToRetry: number[] = []
+  ): Promise<string> {
+    
+    const chunks = this.splitTextIntoChunks(content);
+    const proofreadChunks: string[] = [...existingChunks];
+
+    while (proofreadChunks.length < chunks.length) {
+        proofreadChunks.push("");
+    }
+
+    const proofreadChunk = async (i: number) => {
+        if (i > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        const chunk = chunks[i];
+        const prompt = `Check the following Markdown content. ${instruction}\n\nCONTENT:\n${chunk}`;
+        
+        try {
+            const result = await this.generate(prompt, "You are a specialized proofreading assistant. Return ONLY the proofread Markdown.", 0.1);
+            proofreadChunks[i] = result.translation; // result is now an object
+            
+            if (onProgress) {
+                await onProgress(i + 1, chunks.length, result.translation);
+            }
+        } catch (error) {
+            console.error(`Error proofreading chunk ${i + 1}/${chunks.length}:`, error);
+            proofreadChunks[i] = chunk;
+            if (onProgress) {
+                await onProgress(i + 1, chunks.length, chunk, true);
+            }
+        }
+    };
+
+    const startIndex = existingChunks.length > 0 ? existingChunks.findIndex(c => !c) : 0;
+    const start = startIndex === -1 ? existingChunks.length : startIndex;
+
+    for (let i = start; i < chunks.length; i++) {
+        if (i >= existingChunks.length || !existingChunks[i]) {
+            await proofreadChunk(i);
+        }
+    }
+
+    for (const i of indicesToRetry) {
+        if (i < chunks.length) {
+            await proofreadChunk(i);
+        }
+    }
+
+    return proofreadChunks.join('\n\n');
+  }
+}
