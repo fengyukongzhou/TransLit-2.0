@@ -14,6 +14,7 @@ export interface Chapter {
   fallbackProofreadChunks?: number[]; // Indices of chunks that returned errors/empty
   isSkippable?: boolean; // Pages to remove completely (Copyright, TOC, Title Page)
   isReference?: boolean; // Pages to keep but NOT translate (References, Notes)
+  isTocPoint?: boolean; // Whether this file is an explicit entry in the original TOC
   glossary?: string; // Cumulative glossary up to the end of this chapter
   chunkGlossaries?: string[]; // Glossary state after each chunk
 }
@@ -31,7 +32,8 @@ export enum AppStatus {
   PROOFREADING = 'PROOFREADING',
   PACKAGING = 'PACKAGING',
   COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  ERROR = 'ERROR',
+  PAUSED = 'PAUSED'
 }
 
 export interface AppConfig {
@@ -49,4 +51,5 @@ export interface AppConfig {
   enableProofreading: boolean;
   useRecommendedPrompts: boolean;
   smartSkip: boolean; // Toggle for skipping non-content pages
+  enableGlossary: boolean; // Toggle for terminology system
 }

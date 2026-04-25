@@ -1,6 +1,6 @@
 
 import { AppConfig } from "../types";
-import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY } from "../prompts";
+import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY, GLOSSARY_OPTIMIZER_PROMPT } from "../prompts";
 
 export class AiService {
   // Safe chunk size to avoid context limits (approx 3000 chars)
@@ -9,6 +9,19 @@ export class AiService {
 
   constructor(config: AppConfig) {
     this.config = config;
+  }
+
+  /**
+   * Cleans the glossary using Gemini to remove noise and redundancies.
+   */
+  async optimizeGlossary(glossaryText: string): Promise<string> {
+      try {
+          const result = await this.generate(`Current Glossary:\n${glossaryText}`, GLOSSARY_OPTIMIZER_PROMPT, 0.2);
+          return result.translation; // translation property holds the text
+      } catch (error) {
+          console.error("Glossary optimization API call failed:", error);
+          throw error;
+      }
   }
 
   /**
@@ -265,7 +278,12 @@ export class AiService {
             .join('\n');
     };
 
-    const baseSystemInstruction = `${systemInstruction}\n\n${TRANSLATION_PROMPT_NOTES}\n\n${TRANSLATION_PROMPT_GLOSSARY}\n\nIMPORTANT: Return results wrapped in <translation> and <glossary> tags as specified.`;
+    const glossaryPart = this.config.enableGlossary ? `\n\n${TRANSLATION_PROMPT_GLOSSARY}` : '';
+    const formatInstruction = this.config.enableGlossary 
+        ? "IMPORTANT: Return results wrapped in <translation> and <glossary> tags as specified."
+        : "IMPORTANT: Return your translation wrapped in <translation> tags.";
+
+    const baseSystemInstruction = `${systemInstruction}\n\n${TRANSLATION_PROMPT_NOTES}${glossaryPart}\n\n${formatInstruction}`;
 
     const translateChunk = async (i: number) => {
         if (i > 0) {
@@ -273,9 +291,11 @@ export class AiService {
         }
 
         const chunk = chunks[i];
-        const glossaryPrompt = currentGlossary 
-            ? `\n\nCURRENT GLOSSARY:\n${currentGlossary}`
-            : "\n\nCURRENT GLOSSARY: (Empty)";
+        const glossaryPrompt = this.config.enableGlossary 
+            ? (currentGlossary 
+                ? `\n\nCURRENT GLOSSARY:\n${currentGlossary}`
+                : "\n\nCURRENT GLOSSARY: (Empty)")
+            : "";
 
         const chunkInstruction = chunks.length > 1
             ? `${baseSystemInstruction}\n\n[System Note: This is part ${i + 1} of ${chunks.length} of the chapter. Maintain strict terminology and stylistic consistency with previous parts.]${glossaryPrompt}`

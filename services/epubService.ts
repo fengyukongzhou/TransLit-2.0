@@ -88,8 +88,10 @@ const mathExtension = {
 marked.use(mathExtension as any);
 
 // Helper to escape XML
-const escapeXml = (unsafe: string): string => {
-  return unsafe.replace(/[<>&'"]/g, (c) => {
+const escapeXml = (unsafe: any): string => {
+  if (unsafe === null || unsafe === undefined) return '';
+  const str = String(unsafe);
+  return str.replace(/[<>&'"]/g, (c) => {
     switch (c) {
       case '<': return '&lt;';
       case '>': return '&gt;';
@@ -104,7 +106,7 @@ const escapeXml = (unsafe: string): string => {
 const CHINESE_EPUB_CSS = `
   @charset "UTF-8";
   
-  /* 基础排版：优先使用小标宋、宋体，优化中文对齐 */
+  /* Basic typography: Prioritize Songti/XIAOBIAOSONG, optimize alignment */
   body {
     font-family: "ZY-XIAOBIAOSONG", "Songti SC", "SimSun", "STSong", "Times New Roman", serif;
     font-size: 1em;
@@ -117,7 +119,7 @@ const CHINESE_EPUB_CSS = `
     margin: 0;
   }
 
-  /* 标题：参考配色 #2e5b60 (Teal)，字体 FZQYS/小标宋，不加粗 */
+  /* Headings: Teal #2e5b60, non-bold */
   h1, h2, h3, h4, h5, h6 {
     font-family: "fzqys", "ZY-XIAOBIAOSONG", "PingFang SC", "Microsoft YaHei", sans-serif;
     font-weight: normal;
@@ -137,7 +139,7 @@ const CHINESE_EPUB_CSS = `
   h2 { font-size: 1.15em; }
   h3 { font-size: 1.1em; }
 
-  /* 段落：严格首行缩进 */
+  /* Paragraphs: Standard indent */
   p {
     text-indent: 2em;
     margin: 0.5em 0;
@@ -146,7 +148,7 @@ const CHINESE_EPUB_CSS = `
     text-justify: inter-ideograph;
   }
 
-  /* 引用：使用仿宋体，深紫褐色 (#412938) */
+  /* Blockquote: FangSong/Serif, dark brown (#412938) */
   blockquote {
     font-family: "fs2", "ZY-FANGSONG", "FangSong", "KaiTi", serif;
     font-size: 1em;
@@ -158,7 +160,7 @@ const CHINESE_EPUB_CSS = `
     background: none;
   }
   
-  /* 分割线：点状线，古铜色 (#A2906A) */
+  /* Horizontal Rule: Dotted, bronze (#A2906A) */
   hr {
     border: 0;
     border-top: 1px dotted #A2906A;
@@ -169,7 +171,7 @@ const CHINESE_EPUB_CSS = `
     height: 1px;
   }
   
-  /* 列表 */
+  /* Lists */
   ul, ol {
     margin: 1em 0 1em 2em;
     padding: 0;
@@ -179,7 +181,7 @@ const CHINESE_EPUB_CSS = `
     margin-bottom: 0.3em;
   }
 
-  /* 图片 */
+  /* Images */
   img {
     display: block;
     margin: 1.5em auto;
@@ -188,7 +190,7 @@ const CHINESE_EPUB_CSS = `
     border-radius: 2px;
   }
   
-  /* 代码块 */
+  /* Code Blocks */
   pre, code {
     font-family: "Consolas", "Monaco", monospace;
     background-color: #f5f5f5;
@@ -198,7 +200,7 @@ const CHINESE_EPUB_CSS = `
     color: #d63384;
   }
   
-  /* 链接 */
+  /* Links */
   a {
     color: #2e5b60;
     text-decoration: none;
@@ -286,6 +288,52 @@ export class EpubService {
       return acc;
     }, {} as Record<string, string>);
 
+    // Find Navigation File (NCX or NAV)
+    let tocMap: Record<string, string> = {};
+    const spine = opfDoc.querySelector("spine");
+    const tocId = spine?.getAttribute("toc");
+
+    // Try NCX (EPUB 2/3)
+    if (tocId && manifestItems[tocId]) {
+      const ncxFile = loadedZip.file(opfDir + manifestItems[tocId]);
+      if (ncxFile) {
+        const ncxXml = await ncxFile.async("string");
+        const ncxDoc = parser.parseFromString(ncxXml, "application/xml");
+        const navPoints = ncxDoc.querySelectorAll("navPoint");
+        navPoints.forEach(point => {
+          const label = point.querySelector("navLabel > text")?.textContent?.trim();
+          const src = point.querySelector("content")?.getAttribute("src");
+          if (label && src) {
+            // Remove anchors for mapping to file
+            const href = src.split('#')[0];
+            if (!tocMap[href]) tocMap[href] = label;
+          }
+        });
+      }
+    }
+
+    // Try NAV (EPUB 3) if NCX failed or as secondary source
+    const navItem = opfDoc.querySelector('manifest > item[properties~="nav"]');
+    if (navItem) {
+      const navHref = navItem.getAttribute("href");
+      if (navHref) {
+        const navFile = loadedZip.file(opfDir + navHref);
+        if (navFile) {
+          const navHtml = await navFile.async("string");
+          const navDoc = parser.parseFromString(navHtml, "text/html");
+          const links = navDoc.querySelectorAll('nav[epub\\:type="toc"] a, nav#toc a');
+          links.forEach(a => {
+            const label = a.textContent?.trim();
+            const src = a.getAttribute("href");
+            if (label && src) {
+              const href = src.split('#')[0];
+              if (!tocMap[href]) tocMap[href] = label;
+            }
+          });
+        }
+      }
+    }
+
     const spineRefs = Array.from(opfDoc.querySelectorAll("spine > itemref"));
     
     let coverId = opfDoc.querySelector('meta[name="cover"]')?.getAttribute('content');
@@ -322,23 +370,45 @@ export class EpubService {
       
       if (fileObj) {
         const htmlContent = await fileObj.async("string");
-        const cleanHtml = DOMPurify.sanitize(htmlContent, { 
-            WHOLE_DOCUMENT: true,
-            FORBID_TAGS: ['style', 'script', 'link'] 
-        });
-        
         const doc = parser.parseFromString(htmlContent, "text/html");
         
         let title = "";
-        const headings = doc.querySelectorAll('h1, h2, h3');
-        if (headings.length > 0) {
-            title = headings[0].textContent?.trim() || "";
+        let isTocPoint = false;
+
+        // 1. Try TOC Map first (Professional Standard)
+        if (tocMap[href]) {
+            title = tocMap[href];
+            isTocPoint = true;
         }
+
+        // 2. If not in TOC, check headings in content
         if (!title) {
-            title = doc.querySelector("title")?.textContent?.trim() || "";
+            const headings = doc.querySelectorAll('h1, h2, h3');
+            const isGarbageTitle = (raw: string) => {
+                if (!raw) return true;
+                const systemPattern = /^(part|page|item|file|index|xhtml|html|untitled|chapter|section|p|id|img|image|text|body|nav)\s?_?\d*$/i;
+                // Extended garbage detection for purely technical labels
+                const isSystem = systemPattern.test(raw) || /^[a-z0-9_\-]+$/i.test(raw);
+                const isFileFormat = raw.toLowerCase().includes('.xhtml') || raw.toLowerCase().includes('.html');
+                const isJustNumbers = /^\d+$/.test(raw);
+                return (isSystem || isFileFormat || isJustNumbers) && raw.length < 15;
+            };
+
+            if (headings.length > 0) {
+                const headTitle = headings[0].textContent?.trim() || "";
+                if (!isGarbageTitle(headTitle)) {
+                    title = headTitle;
+                }
+            }
         }
+        
+        // 3. Fallback: Inherit from previous or use a placeholder that won't pollute the TOC
         if (!title) {
-            title = `Chapter ${chapters.length + 1}`;
+            if (chapters.length > 0) {
+                title = chapters[chapters.length - 1].title;
+            } else {
+                title = "Front Matter";
+            }
         }
         
         const bodyContent = doc.body.innerHTML;
@@ -347,7 +417,6 @@ export class EpubService {
         const lowerTitle = title.trim().toLowerCase();
         const lowerHref = href.toLowerCase();
 
-        // Standard regex without extra Chinese keywords
         const isSkippable = /^(copyright|colophon|imprint|legal|cover|title\s?page|table\s?of\s?contents|^toc$|dedication)/i.test(lowerTitle)
           || /(copyright|cover|title[\-_]?page|toc|contents)\.(xhtml|html|xml)$/i.test(lowerHref);
 
@@ -362,7 +431,8 @@ export class EpubService {
           content: htmlContent,
           markdown: markdown,
           isSkippable,
-          isReference
+          isReference,
+          isTocPoint
         });
       }
     }
@@ -429,6 +499,8 @@ export class EpubService {
     let spineItems = '';
     let navPoints = '';
     let navList = '';
+    let lastAddedTitle = '';
+    let navCount = 0;
 
     for (let i = 0; i < chapters.length; i++) {
       const ch = chapters[i];
@@ -447,6 +519,12 @@ export class EpubService {
         gfm: true
       });
       
+      // XHTML Compliance: Close unclosed tags commonly generated by markdown parsers
+      htmlBody = htmlBody
+        .replace(/<br>/g, '<br/>')
+        .replace(/<hr>/g, '<hr/>')
+        .replace(/<img([^>]*)>/g, '<img$1/>');
+
       htmlBody = htmlBody.replace(/src="([^"]+)"/g, (match, srcPath) => {
         if (srcPath.startsWith('http') || srcPath.startsWith('//')) return match;
         
@@ -457,13 +535,29 @@ export class EpubService {
         return match;
       });
 
-      const safeTitle = escapeXml(ch.title);
+      const safeTitle = escapeXml(ch.title).trim();
+      
+      // XHTML Compliance: Close unclosed tags commonly generated by markdown parsers
+      htmlBody = htmlBody
+        .replace(/<br>/g, '<br/>')
+        .replace(/<hr>/g, '<hr/>')
+        .replace(/<img([^>]*)>/g, '<img$1/>');
+
+      htmlBody = htmlBody.replace(/src="([^"]+)"/g, (match, srcPath) => {
+        if (srcPath.startsWith('http') || srcPath.startsWith('//')) return match;
+        
+        const fileName = srcPath.split('/').pop();
+        if (fileName) {
+          return `src="images/${fileName}"`;
+        }
+        return match;
+      });
 
       // Added xmlns:m for MathML support
       const fullHtml = `<?xml version='1.0' encoding='utf-8'?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:m="http://www.w3.org/1998/Math/MathML" lang="${isChinese ? 'zh' : 'en'}">
 <head>
-  <title>${safeTitle}</title>
+  <title>${safeTitle || 'Chapter'}</title>
   <link rel="stylesheet" href="css/styles.css" type="text/css"/>
 </head>
 <body>
@@ -478,25 +572,35 @@ ${htmlBody}
       manifestItems += `<item id="${id}" href="${fileName}" media-type="application/xhtml+xml"/>\n`;
       spineItems += `<itemref idref="${id}"/>\n`;
       
-      navPoints += `<navPoint id="nav${i+1}" playOrder="${i+1}">
-        <navLabel><text>${safeTitle}</text></navLabel>
-        <content src="${fileName}"/>
-      </navPoint>\n`;
+      // TOC Entry logic: Respect isTocPoint or force first chapter
+      if (ch.isTocPoint || (i === 0 && !chapters.some(c => c.isTocPoint))) {
+        navCount++;
+        navPoints += `<navPoint id="nav${navCount}" playOrder="${navCount}">
+          <navLabel><text>${safeTitle}</text></navLabel>
+          <content src="${fileName}"/>
+        </navPoint>\n`;
 
-      navList += `<li><a href="${fileName}">${safeTitle}</a></li>\n`;
+        navList += `<li><a href="${fileName}">${safeTitle}</a></li>\n`;
+      }
     }
 
     const navContent = `<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="${isChinese ? 'zh' : 'en'}">
 <head>
-  <title>${isChinese ? '目录' : 'Table of Contents'}</title>
+  <title>Table of Contents</title>
   <link rel="stylesheet" href="css/styles.css" type="text/css"/>
+  <meta charset="utf-8" />
 </head>
 <body>
   <nav epub:type="toc" id="toc">
-    <h1>${isChinese ? '目录' : 'Table of Contents'}</h1>
+    <h1>Table of Contents</h1>
     <ol>
       ${navList}
+    </ol>
+  </nav>
+  <nav epub:type="landmarks" hidden="hidden">
+    <ol>
+      <li><a epub:type="toc" href="nav.xhtml">Table of Contents</a></li>
     </ol>
   </nav>
 </body>
@@ -504,7 +608,8 @@ ${htmlBody}
     
     zip.file("nav.xhtml", navContent);
 
-    const safeBookTitle = escapeXml(title);
+    const safeBookTitle = escapeXml(title || 'Untitled Book');
+    const fullBookTitle = `${safeBookTitle}【TransLit】`;
     const uuid = `urn:uuid:${crypto.randomUUID()}`;
     const date = new Date().toISOString().split('T')[0];
     
@@ -515,7 +620,7 @@ ${htmlBody}
     const opfContent = `<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
-    <dc:title>${safeBookTitle} (Translated)</dc:title>
+    <dc:title>${fullBookTitle}</dc:title>
     <dc:language>${isChinese ? 'zh' : 'en'}</dc:language>
     <dc:identifier id="uuid_id">${uuid}</dc:identifier>
     <dc:date>${date}</dc:date>
@@ -527,6 +632,7 @@ ${htmlBody}
     ${manifestItems}
   </manifest>
   <spine toc="ncx">
+    <itemref idref="nav" linear="no"/>
     ${spineItems}
   </spine>
 </package>`;
@@ -541,7 +647,7 @@ ${htmlBody}
     <meta name="dtb:totalPageCount" content="0"/>
     <meta name="dtb:maxPageNumber" content="0"/>
   </head>
-  <docTitle><text>${safeBookTitle}</text></docTitle>
+  <docTitle><text>${fullBookTitle}</text></docTitle>
   <navMap>
     ${navPoints}
   </navMap>

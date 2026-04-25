@@ -1,6 +1,11 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { BookOpen, FileCheck, Loader2, Download, AlertTriangle, RefreshCw, Trash2, Save, Info, Plus, X } from 'lucide-react';
+import { 
+  BookOpen, FileCheck, Loader2, Download, AlertTriangle, 
+  RefreshCw, Trash2, Save, Info, Plus, X, Eye, Ban, FileCode,
+  CheckCircle2, Eraser, Pause, Sparkles
+} from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import FileUpload from './components/FileUpload';
 import SettingsPanel from './components/SettingsPanel';
 import { EpubService } from './services/epubService';
@@ -18,8 +23,121 @@ const DEFAULT_CONFIG: AppConfig = {
   proofreadInstruction: 'Proofread the following text for grammar and flow. For bold or italic text, use HTML tags (<b> and <i>) instead of Markdown asterisks (* or **).',
   enableProofreading: true,
   useRecommendedPrompts: true,
-  smartSkip: true
+  smartSkip: true,
+  enableGlossary: true
 };
+
+// Helper to resolve relative paths in EPUB
+const resolveEpubPath = (basePath: string, relativePath: string): string => {
+    if (!relativePath || relativePath.startsWith('http') || relativePath.startsWith('data:')) return relativePath;
+    
+    // Standardize separators
+    let rel = relativePath.replace(/\\/g, '/');
+    let base = basePath.replace(/\\/g, '/');
+    
+    // Remove ./ 
+    rel = rel.replace(/^\.\//, '');
+    
+    const baseParts = base.split('/').filter(p => p);
+    baseParts.pop(); // remove filename to get directory
+    
+    const relParts = rel.split('/').filter(p => p);
+    
+    for (const part of relParts) {
+        if (part === '..') {
+            baseParts.pop();
+        } else if (part !== '.') {
+            baseParts.push(part);
+        }
+    }
+    
+    return baseParts.join('/');
+};
+
+const MarkdownImage: React.FC<{ src?: string, alt?: string, chapterPath: string, persistence: PersistenceService }> = ({ src, alt, chapterPath, persistence }) => {
+    const [blobUrl, setBlobUrl] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+
+    useEffect(() => {
+        if (!src) {
+            setIsLoading(false);
+            return;
+        }
+
+        let currentUrl: string | null = null;
+
+        const loadImg = async () => {
+            try {
+                const fullPath = resolveEpubPath(chapterPath, src);
+                const blob = await persistence.getImage(fullPath);
+                if (blob) {
+                    currentUrl = URL.createObjectURL(blob);
+                    setBlobUrl(currentUrl);
+                }
+            } catch (e) {
+                console.warn("Failed to load preview image:", src, e);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        loadImg();
+
+        return () => {
+            if (currentUrl) URL.revokeObjectURL(currentUrl);
+        };
+    }, [src, chapterPath]);
+
+    if (!src) return null;
+    if (isLoading) return <div className="w-full h-32 bg-stone-100 animate-pulse rounded-lg flex items-center justify-center text-stone-400 text-xs font-serif italic">Loading image...</div>;
+    
+    return (
+        <img 
+            src={blobUrl || src} 
+            alt={alt} 
+            className="rounded-lg shadow-sm mx-auto my-6 max-h-[500px] object-contain bg-stone-50"
+            onError={(e) => {
+                // If blob fails, it might be a real external URL or missing
+                (e.target as HTMLImageElement).className = "hidden";
+            }}
+        />
+    );
+};
+
+const parseGlossaryStr = (str: string): Record<string, string> => {
+  const lines = str.split('\n');
+  const result: Record<string, string> = {};
+  lines.forEach(line => {
+    // 1. Try structural format: SOURCE: xxx | TARGET: yyy
+    const structuralMatch = line.match(/SOURCE:\s*(.*?)\s*\|\s*TARGET:\s*(.*)/i);
+    if (structuralMatch) {
+        const key = structuralMatch[1].trim();
+        const value = structuralMatch[2].trim();
+        if (key && value) {
+            result[key] = value;
+            return;
+        }
+    }
+
+    // 2. Fallback to simple format: Key: Value
+    const parts = line.split(':');
+    if (parts.length >= 2) {
+      const key = parts[0].trim();
+      const value = parts.slice(1).join(':').trim();
+      if (key && value && !key.toLowerCase().includes('source') && !key.toLowerCase().includes('target')) {
+          result[key] = value;
+      }
+    }
+  });
+  return result;
+}
+
+const glossaryToOutputStr = (glossary: Record<string, string>): string => {
+  return Object.entries(glossary)
+    .sort()
+    .map(([k, v]) => `SOURCE: ${k} | TARGET: ${v}`)
+    .join('\n');
+}
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -34,16 +152,21 @@ const App: React.FC = () => {
   const [liveGlossary, setLiveGlossary] = useState<string>('');
   const [glossaryMap, setGlossaryMap] = useState<Record<string, string>>({});
   const [isBulkEdit, setIsBulkEdit] = useState(false);
+  const [previewChapter, setPreviewChapter] = useState<Chapter | null>(null);
+  const [chapters, setChapters] = useState<Chapter[]>([]); // Added state for chapters to trigger re-renders
+  const [isCleaningGlossary, setIsCleaningGlossary] = useState(false);
   
   // Refs for services and data persistence
   const epubService = useRef(new EpubService());
   const persistenceService = useRef(new PersistenceService());
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const isPauseRequested = useRef(false);
   
   // Persist chapters and images across renders to allow resuming
   const chaptersRef = useRef<Chapter[]>([]);
   const imagesRef = useRef<Record<string, Blob>>({});
   const coverPathRef = useRef<string | undefined>(undefined);
+  const lastOptimizedCountRef = useRef<number>(0);
 
   // Initialize Persistence
   useEffect(() => {
@@ -64,8 +187,14 @@ const App: React.FC = () => {
             if (savedChapters.length > 0) {
                 // Restore data to refs
                 chaptersRef.current = savedChapters.sort((a, b) => a.index - b.index);
+                setChapters(chaptersRef.current); // Sync state
                 // imagesRef.current = savedImages; // Don't load to RAM
                 coverPathRef.current = session.coverPath;
+                
+                // Restore glossary
+                const savedGlossary = await persistenceService.current.loadGlossary();
+                setGlossaryMap(savedGlossary);
+                setLiveGlossary(glossaryToOutputStr(savedGlossary));
                 
                 // Restore UI state
                 setConfig(session.config);
@@ -83,10 +212,10 @@ const App: React.FC = () => {
                      try {
                          const savedImages = await persistenceService.current.loadImages();
                          const blob = await epubService.current.generateEpub(
-                            savedChapters.sort((a, b) => a.index - b.index),
+                            savedChapters.filter(c => !c.isSkippable).sort((a, b) => a.index - b.index),
                             savedImages,
                             session.fileName.replace('.epub', '') || 'translated_book',
-                            session.config.targetLanguage,
+                            'Chinese (Simplified)',
                             session.coverPath
                          );
                          const url = URL.createObjectURL(blob);
@@ -116,12 +245,57 @@ const App: React.FC = () => {
     init();
   }, []);
 
+  const optimizeGlossary = async (isManual: boolean = false) => {
+    const termCount = Object.keys(glossaryMap).length;
+    
+    // Skip if not enough terms to optimize (minimum 5 terms for sanity)
+    if (termCount < 5) {
+        if (isManual) addLog(`[Agent] Glossary Janitor: Not enough terms to analyze yet (Minimum 5).`, 'info');
+        return;
+    }
+
+    if (isCleaningGlossary) return;
+    
+    setIsCleaningGlossary(true);
+    addLog(`[Agent] Glossary Janitor: Analyzing and optimizing ${termCount} terms...`, 'process');
+    
+    try {
+        const aiService = new AiService(config);
+        const currentText = glossaryToOutputStr(glossaryMap);
+        const optimizedText = await aiService.optimizeGlossary(currentText);
+        
+        if (optimizedText && optimizedText.length > 10) {
+            const newMap = parseGlossaryStr(optimizedText);
+            const newCount = Object.keys(newMap).length;
+            const removedCount = termCount - newCount;
+            
+            await persistenceService.current.replaceGlossary(newMap);
+            const finalized = await persistenceService.current.loadGlossary();
+            
+            setGlossaryMap(finalized);
+            setLiveGlossary(glossaryToOutputStr(finalized));
+            lastOptimizedCountRef.current = newCount;
+            
+            if (removedCount > 0) {
+                addLog(`[Agent] Glossary cleaned. Removed ${removedCount} redundant entries.`, 'success');
+            } else {
+                addLog(`[Agent] Glossary verified. No noise detected.`, 'success');
+            }
+        }
+    } catch (e) {
+        console.error("Glossary optimization failed:", e);
+        addLog(`[Agent] Glossary optimization failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
+    } finally {
+        setIsCleaningGlossary(false);
+    }
+  };
+
   // Auto scroll logs
   useEffect(() => {
-    if (logsEndRef.current) {
+    if (viewMode === 'logs' && logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [logs]);
+  }, [logs, viewMode]);
 
   const addLog = (message: string, type: ProcessingLog['type'] = 'info') => {
     const newLog: ProcessingLog = { timestamp: Date.now(), message, type };
@@ -152,6 +326,44 @@ const App: React.FC = () => {
     setStatus(AppStatus.IDLE);
     setRestoredSession(false);
     addLog(`Selected file: ${file.name}`, 'info');
+
+    // AUTO-PARSE EPUB IMMEDIATELY
+    try {
+        setStatus(AppStatus.PARSING);
+        addLog("Parsing EPUB and converting XHTML to Markdown...", "process");
+        const { chapters: extractedChapters, images, coverPath } = await epubService.current.parseEpub(file);
+        
+        chaptersRef.current = extractedChapters;
+        setChapters(extractedChapters); // Sync state for UI
+        coverPathRef.current = coverPath;
+
+        // Persist initial data
+        await persistenceService.current.saveChapters(extractedChapters);
+        await persistenceService.current.saveImages(images);
+        
+        // Save initial session state
+        await persistenceService.current.saveSession({
+            status: AppStatus.IDLE, // Keep IDLE so user can review chapters before starting
+            config,
+            progress: 0,
+            fileName: file.name,
+            coverPath: coverPath,
+            lastUpdated: Date.now()
+        });
+
+        addLog(`Extracted ${extractedChapters.length} chapters and ${Object.keys(images).length} images.`, "success");
+        if (coverPath) {
+            addLog(`Cover image detected.`, 'info');
+        }
+        
+        // Auto-switch to chapters view so user sees the content
+        setViewMode('chapters');
+        setStatus(AppStatus.IDLE); // Return to idle for user to adjust settings/chapters
+    } catch (parseError) {
+        console.error("Auto-parse failed:", parseError);
+        addLog(`Failed to parse EPUB: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`, "error");
+        setStatus(AppStatus.ERROR);
+    }
   };
 
   const handleReset = async () => {
@@ -180,15 +392,15 @@ const App: React.FC = () => {
 
   const getLocalizedSourceName = (lang: string) => {
     const mapping: Record<string, string> = {
-      "English": "英文",
-      "Japanese": "日文",
-      "Korean": "韩文",
-      "French": "法文",
-      "German": "德文",
-      "Spanish": "西文",
-      "Russian": "俄文",
-      "Italian": "意文",
-      "Portuguese": "葡文"
+      "English": "English",
+      "Japanese": "Japanese",
+      "Korean": "Korean",
+      "French": "French",
+      "German": "German",
+      "Spanish": "Spanish",
+      "Russian": "Russian",
+      "Italian": "Italian",
+      "Portuguese": "Portuguese"
     };
     return mapping[lang] || lang;
   };
@@ -215,21 +427,26 @@ const App: React.FC = () => {
        return currentGlossary;
     }
     
-    // Handle Smart Skip Logic
-    if (config.smartSkip && !forceTranslateIndices.length && !forceProofreadIndices.length) {
-        if (chapter.isSkippable) return currentGlossary;
-        if (chapter.isReference) {
-            if (!chapter.translatedMarkdown) {
-                addLog(`Keeping reference chapter untranslated: ${chapter.title}`, "info");
-                chapter.translatedMarkdown = chapter.markdown;
-                chapter.proofreadMarkdown = chapter.markdown;
-                chapter.fallbackChunks = [];
-                chapter.fallbackProofreadChunks = [];
-                updated = true;
-                await persistenceService.current.updateChapter(chapter);
-            }
-            return currentGlossary;
+    // Handle Skippable / Reference Logic
+    if (chapter.isSkippable) {
+        return currentGlossary;
+    }
+
+    if (chapter.isReference) {
+        // Force reset to original if it's marked as reference
+        // This handles the case where it was previously translated but user changed mind
+        if (chapter.translatedMarkdown !== chapter.markdown) {
+            addLog(`Resetting "${chapter.title}" to original (Reference mode)...`, "info");
+            chapter.translatedMarkdown = chapter.markdown;
+            chapter.proofreadMarkdown = chapter.markdown;
+            chapter.translatedChunks = [];
+            chapter.proofreadChunks = [];
+            chapter.fallbackChunks = [];
+            chapter.fallbackProofreadChunks = [];
+            updated = true;
+            await persistenceService.current.updateChapter(chapter);
         }
+        return currentGlossary;
     }
 
     // --- Translation ---
@@ -360,42 +577,46 @@ const App: React.FC = () => {
         const aiService = new AiService(config);
         const chapters = chaptersRef.current;
         const chapter = chapters[index];
-        
-        // Use AI split to recover original chunk structure
-        const sourceChunks = aiService.splitTextIntoChunks(chapter.markdown);
-        
-        // Sync local fallbacks with detection if needed
-        if (type === 'translate') {
-            const explicit = chapter.fallbackChunks || [];
-            const implicit: number[] = [];
-            // If translatedMarkdown exists but chunks are missing/mismatched, scan by content
-            sourceChunks.forEach((sChunk, i) => {
-                const trimmed = sChunk.trim();
-                if (trimmed.length > 20 && chapter.translatedMarkdown?.includes(trimmed)) {
-                    implicit.push(i);
-                }
-            });
-            chapter.fallbackChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
+
+        // If chapter is skip or reference, we just run processChapter to ensure its state is synced
+        // and it bypasses the chunk splitting logic which might fail or be unnecessary
+        if (!chapter.isSkippable && !chapter.isReference) {
+            // Use AI split to recover original chunk structure
+            const sourceChunks = aiService.splitTextIntoChunks(chapter.markdown);
             
-            // Re-initialize chunks array if it's stale/missing
-            if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
-                chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
-            }
-        } else if (type === 'proofread') {
-            const explicit = chapter.fallbackProofreadChunks || [];
-            const implicit: number[] = [];
-            const tChunks = aiService.splitTextIntoChunks(chapter.translatedMarkdown || '');
-            tChunks.forEach((tChunk, i) => {
-                const trimmed = tChunk.trim();
-                if (trimmed.length > 20 && chapter.proofreadMarkdown?.includes(trimmed)) {
-                    implicit.push(i);
+            // Sync local fallbacks with detection if needed
+            if (type === 'translate') {
+                const explicit = chapter.fallbackChunks || [];
+                const implicit: number[] = [];
+                // If translatedMarkdown exists but chunks are missing/mismatched, scan by content
+                sourceChunks.forEach((sChunk, i) => {
+                    const trimmed = sChunk.trim();
+                    if (trimmed.length > 20 && chapter.translatedMarkdown?.includes(trimmed)) {
+                        implicit.push(i);
+                    }
+                });
+                chapter.fallbackChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
+                
+                // Re-initialize chunks array if it's stale/missing
+                if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
+                    chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
                 }
-            });
-            chapter.fallbackProofreadChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
-            
-            // Re-initialize chunks array if it's stale/missing
-            if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== tChunks.length) {
-                chapter.proofreadChunks = new Array(tChunks.length).fill(null);
+            } else if (type === 'proofread') {
+                const explicit = chapter.fallbackProofreadChunks || [];
+                const implicit: number[] = [];
+                const tChunks = aiService.splitTextIntoChunks(chapter.translatedMarkdown || '');
+                tChunks.forEach((tChunk, i) => {
+                    const trimmed = tChunk.trim();
+                    if (trimmed.length > 20 && chapter.proofreadMarkdown?.includes(trimmed)) {
+                        implicit.push(i);
+                    }
+                });
+                chapter.fallbackProofreadChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
+                
+                // Re-initialize chunks array if it's stale/missing
+                if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== tChunks.length) {
+                    chapter.proofreadChunks = new Array(tChunks.length).fill(null);
+                }
             }
         }
 
@@ -434,7 +655,7 @@ const App: React.FC = () => {
         // Update percentages
         const totalSteps = chapters.length * (config.enableProofreading ? 2 : 1);
         const stepsDoneCount = chapters.reduce((acc, c) => {
-            if (config.smartSkip && c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+            if (c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
             const tDone = c.translatedMarkdown ? 1 : 0;
             const pDone = (config.enableProofreading && c.proofreadMarkdown) ? 1 : 0;
             return acc + tDone + pDone;
@@ -470,41 +691,6 @@ const App: React.FC = () => {
           lastUpdated: Date.now()
       });
   };
-
-  const parseGlossaryStr = (str: string): Record<string, string> => {
-    const lines = str.split('\n');
-    const result: Record<string, string> = {};
-    lines.forEach(line => {
-      // 1. Try structural format: SOURCE: xxx | TARGET: yyy
-      const structuralMatch = line.match(/SOURCE:\s*(.*?)\s*\|\s*TARGET:\s*(.*)/i);
-      if (structuralMatch) {
-          const key = structuralMatch[1].trim();
-          const value = structuralMatch[2].trim();
-          if (key && value) {
-              result[key] = value;
-              return;
-          }
-      }
-
-      // 2. Fallback to simple format: Key: Value
-      const parts = line.split(':');
-      if (parts.length >= 2) {
-        const key = parts[0].trim();
-        const value = parts.slice(1).join(':').trim();
-        if (key && value && !key.toLowerCase().includes('source') && !key.toLowerCase().includes('target')) {
-            result[key] = value;
-        }
-      }
-    });
-    return result;
-  }
-
-  const glossaryToOutputStr = (glossary: Record<string, string>): string => {
-    return Object.entries(glossary)
-      .sort()
-      .map(([k, v]) => `SOURCE: ${k} | TARGET: ${v}`)
-      .join('\n');
-  }
 
   const handleUpdateGlossary = async (newText: string) => {
     const newMap = parseGlossaryStr(newText);
@@ -542,14 +728,57 @@ const App: React.FC = () => {
     addLog("Master glossary saved.", "success");
   }
 
+  const toggleChapterSkip = async (index: number) => {
+    const updatedChapters = [...chaptersRef.current];
+    updatedChapters[index] = { 
+        ...updatedChapters[index], 
+        isSkippable: !updatedChapters[index].isSkippable,
+        isReference: false // Mutually exclusive for simplicity
+    };
+    chaptersRef.current = updatedChapters;
+    setChapters(updatedChapters);
+    await persistenceService.current.updateChapter(updatedChapters[index]);
+    addLog(`Chapter "${updatedChapters[index].title}" marked as ${updatedChapters[index].isSkippable ? 'Skipped' : 'Included'}.`, 'info');
+    
+    // Auto-rebuild if completed to ensure download link is fresh
+    if (status === AppStatus.COMPLETED) {
+        await rebuildEpub(updatedChapters, config, currentFile?.name || 'book');
+    }
+  };
+
+  const toggleChapterReference = async (index: number) => {
+    const updatedChapters = [...chaptersRef.current];
+    updatedChapters[index] = { 
+        ...updatedChapters[index], 
+        isReference: !updatedChapters[index].isReference,
+        isSkippable: false // Mutually exclusive
+    };
+    chaptersRef.current = updatedChapters;
+    setChapters(updatedChapters);
+    await persistenceService.current.updateChapter(updatedChapters[index]);
+    addLog(`Chapter "${updatedChapters[index].title}" marked as ${updatedChapters[index].isReference ? 'Reference (No translation)' : 'To Translate'}.`, 'info');
+
+    // Auto-rebuild if completed
+    if (status === AppStatus.COMPLETED) {
+        await rebuildEpub(updatedChapters, config, currentFile?.name || 'book');
+    }
+  };
+
+  const handlePause = () => {
+    if (status === AppStatus.TRANSLATING || status === AppStatus.PROOFREADING || status === AppStatus.PARSING) {
+        isPauseRequested.current = true;
+        addLog("Pause requested. Finish current chapter and stopping...", "info");
+    }
+  };
+
   const rebuildEpub = async (chaptersList: Chapter[], sessionConfig: AppConfig, fileName: string) => {
     setStatus(AppStatus.PACKAGING);
     addLog(`Recompiling EPUB...`, "process");
     
     try {
-        const chaptersToPack = sessionConfig.smartSkip 
-          ? chaptersList.filter(c => !c.isSkippable)
-          : chaptersList;
+        // Always filter out manually skipped chapters, even if global smartSkip is off
+        // This ensures the manual "Skip" UI buttons always work
+        const chaptersToPack = chaptersList.filter(c => !c.isSkippable);
 
         const images = await persistenceService.current.loadImages();
         const blob = await epubService.current.generateEpub(
@@ -577,35 +806,27 @@ const App: React.FC = () => {
     try {
       const aiService = new AiService(config);
       
-      // Step 1: Parse EPUB (Only if not already parsed)
-      if (chaptersRef.current.length === 0) {
-        if (!currentFile) {
-            addLog("Error: No file selected and no restored data found.", "error");
-            return;
-        }
+      // Step 1: Parse EPUB (Only if not already parsed - fallback safety)
+      if (chaptersRef.current.length === 0 && currentFile) {
         setStatus(AppStatus.PARSING);
         addLog("Parsing EPUB and converting XHTML to Markdown...", "process");
-        const { chapters, images, coverPath } = await epubService.current.parseEpub(currentFile);
+        const { chapters: extractedChapters, images, coverPath } = await epubService.current.parseEpub(currentFile);
         
-        chaptersRef.current = chapters;
-        // imagesRef.current = images; // MEMORY OPTIMIZATION: Do not keep in RAM
+        chaptersRef.current = extractedChapters;
+        setChapters(extractedChapters); // Sync state
         coverPathRef.current = coverPath;
 
         // Persist initial data
-        await persistenceService.current.saveChapters(chapters);
+        await persistenceService.current.saveChapters(extractedChapters);
         await persistenceService.current.saveImages(images);
         await saveSessionState(AppStatus.PARSING);
 
-        addLog(`Extracted ${chapters.length} chapters and ${Object.keys(images).length} images.`, "success");
+        addLog(`Extracted ${extractedChapters.length} chapters and ${Object.keys(images).length} images.`, "success");
         if (coverPath) {
             addLog(`Cover image detected.`, 'info');
         }
-      } else {
-        addLog("Resuming workflow with existing parsed data...", "info");
       }
 
-      const chapters = chaptersRef.current;
-      
       const localizedSource = getLocalizedSourceName(config.sourceLanguage);
       const effectiveSystemInstruction = (config.useRecommendedPrompts 
         ? RECOMMENDED_TRANSLATION_PROMPT
@@ -616,7 +837,10 @@ const App: React.FC = () => {
         : config.proofreadInstruction;
 
       addLog(`Starting translation using ${config.modelName}...`, "info");
-      if (viewMode === 'logs') setViewMode('chapters'); // Switch to chapters view automatically
+      const startTimeObj = new Date();
+      addLog(`Start Time: ${startTimeObj.toLocaleTimeString()}`, "info");
+      const processStartTime = startTimeObj.getTime();
+      let chaptersTranslatedCount = 0;
       
       if (config.smartSkip) {
         addLog("Smart Skip enabled: Title pages, Copyright, TOC will be REMOVED. References will be KEPT (untranslated).", "info");
@@ -629,13 +853,48 @@ const App: React.FC = () => {
       runningGlossary = glossaryToOutputStr(initialGlossaryFromDb);
       setLiveGlossary(runningGlossary);
 
-      for (let i = 0; i < chapters.length; i++) {
-        runningGlossary = await processChapter(i, aiService, chapters, effectiveSystemInstruction, effectiveProofreadInstruction, [], [], runningGlossary);
+      isPauseRequested.current = false; // Reset pause flag
+      setStatus(AppStatus.TRANSLATING);
+
+      for (let i = 0; i < chaptersRef.current.length; i++) {
+        if (isPauseRequested.current) {
+            addLog("Process paused by user.", "info");
+            setStatus(AppStatus.PAUSED);
+            await saveSessionState(AppStatus.PAUSED);
+            return;
+        }
+
+        // Re-check skip/reference status in each iteration to respect real-time user changes
+        const currentChapter = chaptersRef.current[i];
+        if (currentChapter.isSkippable) {
+            continue;
+        }
+
+        const chapterStartTime = Date.now();
+        const termsBefore = Object.keys(await persistenceService.current.loadGlossary()).length;
+        runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, effectiveProofreadInstruction, [], [], runningGlossary);
+        const termsAfter = Object.keys(await persistenceService.current.loadGlossary()).length;
+        
+        const chapterDuration = ((Date.now() - chapterStartTime) / 1000).toFixed(1);
+        if (!currentChapter.translatedMarkdown) {
+             // If it was already translated, we might not count it as "just translated" depending on processChapter logic
+             // But usually it translates if needed.
+        }
+        chaptersTranslatedCount++;
+        addLog(`Finished Chapter ${i+1} in ${chapterDuration}s`, "success");
+        
+        // Smart Glossary Cleanup (Agent) - After each chapter if 5+ terms added
+        if (config.enableGlossary && !isPauseRequested.current && (termsAfter - termsBefore >= 5)) {
+            await optimizeGlossary();
+            // Refresh runningGlossary from optimized master
+            const freshGlossary = await persistenceService.current.loadGlossary();
+            runningGlossary = glossaryToOutputStr(freshGlossary);
+        }
         
         // Update progress
-        const currentTotalSteps = chapters.length * (config.enableProofreading ? 2 : 1);
-        const stepsDone = chapters.reduce((acc, c) => {
-             if (config.smartSkip && c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+        const currentTotalSteps = chaptersRef.current.length * (config.enableProofreading ? 2 : 1);
+        const stepsDone = chaptersRef.current.reduce((acc, c) => {
+             if (c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
              const tDone = c.translatedMarkdown ? 1 : 0;
              const pDone = (config.enableProofreading && c.proofreadMarkdown) ? 1 : 0;
              return acc + tDone + pDone;
@@ -649,7 +908,22 @@ const App: React.FC = () => {
       // Final Step: Packaging
       if (currentFile) {
           setProgress(100);
-          await rebuildEpub(chapters, config, currentFile.name);
+          const endTimeObj = new Date();
+          const totalDurationMs = endTimeObj.getTime() - processStartTime;
+          const totalDurationMin = (totalDurationMs / 1000 / 60).toFixed(1);
+          const avgTimePerChapter = chaptersTranslatedCount > 0 
+            ? (totalDurationMs / 1000 / chaptersTranslatedCount).toFixed(1) 
+            : 0;
+
+          addLog(`----------------------------------------`, "info");
+          addLog(`Translation Completed!`, "success");
+          addLog(`End Time: ${endTimeObj.toLocaleTimeString()}`, "info");
+          addLog(`Duration: ${totalDurationMin} minutes`, "success");
+          addLog(`Chapters Processed: ${chaptersTranslatedCount}`, "info");
+          addLog(`Average Speed: ${avgTimePerChapter}s per chapter`, "info");
+          addLog(`----------------------------------------`, "info");
+          
+          await rebuildEpub(chaptersRef.current, config, currentFile.name);
       } else {
           addLog("Missing file context for packaging.", "error");
           setStatus(AppStatus.ERROR);
@@ -755,14 +1029,24 @@ const App: React.FC = () => {
                  </div>
 
                  <div className="flex gap-3">
-                    {/* Start Button */}
-                    {status === AppStatus.IDLE && (
+                    {/* Start / Resume Button */}
+                    {(status === AppStatus.IDLE || status === AppStatus.PAUSED) && (
                     <button
                         onClick={startProcessing}
                         className="flex-1 bg-stone-800 hover:bg-stone-900 text-[#f5f5f0] px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5"
                     >
-                        {chaptersRef.current.length > 0 ? "Resume Translation" : "Start Translation"}
+                        {chapters.length > 0 ? "Resume Translation" : "Start Translation"}
                     </button>
+                    )}
+
+                    {/* Pause Button */}
+                    {(status === AppStatus.TRANSLATING || status === AppStatus.PROOFREADING || status === AppStatus.PARSING) && (
+                        <button 
+                            onClick={handlePause}
+                            className="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-900 px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md flex items-center justify-center gap-2 border border-amber-200"
+                        >
+                            <Pause className="w-4 h-4" /> Pause Translation
+                        </button>
                     )}
 
                     {/* Resume Button */}
@@ -786,6 +1070,19 @@ const App: React.FC = () => {
                     )}
                  </div>
                </div>
+            )}
+            
+            {status === AppStatus.PAUSED && (
+                <div className="bg-amber-50 border border-amber-100 text-amber-800 p-5 rounded-2xl flex items-start gap-4 text-sm shadow-sm">
+                    <Info className="w-5 h-5 shrink-0 mt-0.5 text-amber-600" />
+                    <div className="flex flex-col gap-1.5">
+                        <span className="font-serif text-base font-medium">Process Paused</span>
+                        <span className="text-amber-700/80 leading-relaxed">
+                            The process has been paused by the user. 
+                            Your progress is safely saved. Click "Resume Translation" to continue exactly where you left off.
+                        </span>
+                    </div>
+                </div>
             )}
             
             {status === AppStatus.ERROR && (
@@ -821,26 +1118,28 @@ const App: React.FC = () => {
                         viewMode === 'chapters' ? 'bg-stone-800 text-stone-100 shadow-sm' : 'text-stone-500 hover:text-stone-300'
                     }`}
                 >
-                    Chapters ({chaptersRef.current.length})
+                    Chapters ({chapters.length})
                 </button>
-                <button 
-                    onClick={() => setViewMode('glossary')}
-                    className={`px-3 py-1.5 rounded-md text-[10px] font-mono tracking-widest uppercase transition-all ${
-                        viewMode === 'glossary' ? 'bg-stone-800 text-stone-100 shadow-sm' : 'text-stone-500 hover:text-stone-300'
-                    }`}
-                >
-                    Glossary
-                </button>
+                {config.enableGlossary && (
+                    <button 
+                        onClick={() => setViewMode('glossary')}
+                        className={`px-3 py-1.5 rounded-md text-[10px] font-mono tracking-widest uppercase transition-all ${
+                            viewMode === 'glossary' ? 'bg-stone-800 text-stone-100 shadow-sm' : 'text-stone-500 hover:text-stone-300'
+                        }`}
+                    >
+                        Glossary
+                    </button>
+                )}
              </div>
 
              <div className="text-xs font-mono text-stone-400 bg-stone-800/50 px-3 py-1.5 rounded-full border border-stone-700/50">
                 {status !== AppStatus.IDLE && status !== AppStatus.COMPLETED && status !== AppStatus.ERROR ? (
                    <span className="flex items-center gap-2">
                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" /> 
-                     {status}...
+                     {status.charAt(0) + status.slice(1).toLowerCase()}...
                    </span>
                 ) : (
-                    <span>{status}</span>
+                    <span>{status.charAt(0) + status.slice(1).toLowerCase()}</span>
                 )}
              </div>
           </div>
@@ -867,12 +1166,12 @@ const App: React.FC = () => {
                 </div>
             ) : viewMode === 'chapters' ? (
                 <div className="p-6 space-y-3">
-                    {chaptersRef.current.length === 0 ? (
+                    {chapters.length === 0 ? (
                         <div className="text-stone-600 italic text-center mt-20 font-serif text-xl">
                             No chapters extracted yet.
                         </div>
                     ) : (
-                        chaptersRef.current.map((chapter, idx) => {
+                        chapters.map((chapter, idx) => {
                             const ai = new AiService(config);
                             const sourceChunks = ai.splitTextIntoChunks(chapter.markdown || '');
                             
@@ -990,53 +1289,89 @@ const App: React.FC = () => {
                                         </div>
                                     </div>
 
-                                    {!isSkipped && (
-                                        <div className="flex gap-2">
-                                            {(hasFallbacks || status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR) && (
+                                    <div className="flex items-center gap-2">
+                                        {!isSkipped && (
+                                            <div className="flex gap-1 mr-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                 <button 
-                                                    onClick={() => {
-                                                        // Sync detected fallbacks to the chapter object before retrying
-                                                        chapter.fallbackChunks = detectedFallbacks;
-                                                        // Ensure translatedChunks is at least pre-split if missing
-                                                        if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
-                                                            chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
-                                                        }
-                                                        handleRetryChapter(idx, 'translate');
-                                                    }}
-                                                    disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
-                                                    className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
-                                                        hasFallbacks 
-                                                            ? 'bg-amber-600 hover:bg-amber-500 text-stone-950 border-amber-400 font-bold animate-pulse' 
-                                                            : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
-                                                    }`}
+                                                    onClick={() => setPreviewChapter(chapter)}
+                                                    className="p-1.5 rounded-lg bg-stone-800 text-stone-400 hover:text-stone-100 hover:bg-stone-700 transition-all"
+                                                    title="Preview Content"
                                                 >
-                                                    <RefreshCw className="w-3 h-3" /> {hasFallbacks ? `Retry ${detectedFallbacks.length} Chunks` : 'Re-Translate'}
+                                                    <Eye className="w-3.5 h-3.5" />
                                                 </button>
-                                            )}
-                                            {config.enableProofreading && (hasProofreadFallbacks || (chapter.proofreadMarkdown && (status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR))) && (
-                                                 <button 
-                                                    onClick={() => {
-                                                        chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
-                                                        if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== (chapter.translatedChunks?.length || sourceChunks.length)) {
-                                                            chapter.proofreadChunks = new Array(sourceChunks.length).fill(null);
-                                                        }
-                                                        handleRetryChapter(idx, 'proofread');
-                                                    }}
-                                                    disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
-                                                    className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
-                                                        hasProofreadFallbacks 
-                                                            ? 'bg-amber-600 hover:bg-amber-500 text-stone-950 border-amber-400 font-bold animate-pulse' 
-                                                            : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
-                                                    }`}
+                                                <button 
+                                                    onClick={() => toggleChapterReference(idx)}
+                                                    className={`p-1.5 rounded-lg transition-all ${chapter.isReference ? 'bg-amber-600 text-stone-950' : 'bg-stone-800 text-stone-400 hover:text-stone-100 hover:bg-stone-700'}`}
+                                                    title={chapter.isReference ? "Enable Translation" : "Keep Original (No Translation)"}
                                                 >
-                                                    <RefreshCw className="w-3 h-3" /> {hasProofreadFallbacks ? `Proof Retry ${detectedProofreadFallbacks.length}` : 'Re-Proofread'}
+                                                    <FileCode className="w-3.5 h-3.5" />
                                                 </button>
-                                            )}
-                                        </div>
-                                    )}
+                                                <button 
+                                                    onClick={() => toggleChapterSkip(idx)}
+                                                    className="p-1.5 rounded-lg bg-stone-800 text-stone-400 hover:text-red-400 hover:bg-red-950/30 transition-all"
+                                                    title="Skip / Remove Chapter"
+                                                >
+                                                    <Ban className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        )}
+                                        {isSkipped && (
+                                            <button 
+                                                onClick={() => toggleChapterSkip(idx)}
+                                                className="mr-3 p-1.5 rounded-lg bg-stone-800 text-stone-400 hover:text-emerald-400 hover:bg-emerald-950/30 transition-all"
+                                                title="Include Chapter"
+                                            >
+                                                <RefreshCw className="w-3.5 h-3.5" />
+                                            </button>
+                                        )}
+                                        {!isSkipped && (
+                                            <div className="flex gap-2">
+                                                {(hasFallbacks || status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR) && (
+                                                    <button 
+                                                        onClick={() => {
+                                                            // Sync detected fallbacks to the chapter object before retrying
+                                                            chapter.fallbackChunks = detectedFallbacks;
+                                                            // Ensure translatedChunks is at least pre-split if missing
+                                                            if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
+                                                                chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
+                                                            }
+                                                            handleRetryChapter(idx, 'translate');
+                                                        }}
+                                                        disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
+                                                        className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
+                                                            hasFallbacks 
+                                                                ? 'bg-amber-600 hover:bg-amber-500 text-stone-950 border-amber-400 font-bold animate-pulse' 
+                                                                : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
+                                                        }`}
+                                                    >
+                                                        <RefreshCw className="w-3 h-3" /> {hasFallbacks ? `Retry ${detectedFallbacks.length} Chunks` : 'Re-Translate'}
+                                                    </button>
+                                                )}
+                                                {config.enableProofreading && (hasProofreadFallbacks || (chapter.proofreadMarkdown && (status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR))) && (
+                                                     <button 
+                                                        onClick={() => {
+                                                            chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
+                                                            if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== (chapter.translatedChunks?.length || sourceChunks.length)) {
+                                                                chapter.proofreadChunks = new Array(sourceChunks.length).fill(null);
+                                                            }
+                                                            handleRetryChapter(idx, 'proofread');
+                                                        }}
+                                                        disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
+                                                        className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
+                                                            hasProofreadFallbacks 
+                                                                ? 'bg-amber-600 hover:bg-amber-500 text-stone-950 border-amber-400 font-bold animate-pulse' 
+                                                                : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
+                                                        }`}
+                                                    >
+                                                        <RefreshCw className="w-3 h-3" /> {hasProofreadFallbacks ? `Proof Retry ${detectedProofreadFallbacks.length}` : 'Re-Proofread'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
 
-                                {chapter.glossary && (
+                                {config.enableGlossary && chapter.glossary && (
                                     <div className="mt-3 pt-3 border-t border-stone-800/50">
                                         <details className="cursor-pointer">
                                             <summary className="text-[10px] font-mono text-stone-500 hover:text-stone-300 uppercase tracking-widest transition-colors focus:outline-none">
@@ -1063,6 +1398,19 @@ const App: React.FC = () => {
                             </p>
                         </div>
                         <div className="flex items-center gap-3">
+                             <button 
+                                onClick={() => optimizeGlossary(true)}
+                                disabled={isCleaningGlossary || status !== AppStatus.IDLE}
+                                className={`text-[10px] px-3 py-1.5 rounded-md flex items-center gap-2 border transition-all ${
+                                    isCleaningGlossary 
+                                        ? 'bg-amber-950 text-amber-500 border-amber-900/50' 
+                                        : 'text-amber-500/80 hover:text-amber-400 border-amber-900/30'
+                                } disabled:opacity-50`}
+                                title="Use AI to remove noise and redundancies"
+                            >
+                                {isCleaningGlossary ? <Loader2 className="w-3 h-3 animate-spin"/> : <Sparkles className="w-3 h-3" />}
+                                {isCleaningGlossary ? 'Cleaning...' : 'Smart Cleanup'}
+                            </button>
                              <button 
                                 onClick={() => setIsBulkEdit(!isBulkEdit)}
                                 className="text-[10px] px-3 py-1.5 rounded-md text-stone-400 hover:text-stone-100 border border-stone-800 transition-all"
@@ -1103,7 +1451,7 @@ const App: React.FC = () => {
                                                     <input 
                                                         type="text" 
                                                         value={key}
-                                                        onChange={(e) => handleUpdateTerm(key, e.target.value, value)}
+                                                        onChange={(e) => handleUpdateTerm(key, e.target.value, value as string)}
                                                         className="w-full bg-transparent p-2 text-stone-200 outline-none focus:bg-stone-800/30 rounded transition-colors font-mono text-sm"
                                                     />
                                                 </td>
@@ -1167,6 +1515,52 @@ const App: React.FC = () => {
         </div>
 
       </main>
+
+      {/* Preview Modal */}
+      {previewChapter && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-10 bg-stone-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+              <div className="bg-[#f5f5f0] w-full max-w-4xl h-[90vh] flex flex-col rounded-3xl shadow-2xl overflow-hidden border border-stone-200 animate-in zoom-in-95 duration-200">
+                  <div className="bg-stone-900 px-6 py-4 flex items-center justify-between border-b border-stone-800">
+                      <div className="flex items-center gap-3">
+                        <Info className="w-5 h-5 text-amber-400" />
+                        <h2 className="text-xl font-serif font-medium text-stone-100">Chapter Preview</h2>
+                      </div>
+                      <button 
+                        onClick={() => setPreviewChapter(null)}
+                        className="p-2 hover:bg-stone-800 rounded-full transition-colors text-stone-400 hover:text-stone-100"
+                      >
+                          <X className="w-6 h-6" />
+                      </button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-8 md:p-12 font-serif text-stone-800 leading-relaxed bg-white">
+                      <div className="max-w-2xl mx-auto">
+                        <h1 className="text-3xl font-medium text-stone-900 mb-8 pb-4 border-b border-stone-100">
+                            {previewChapter.title}
+                        </h1>
+                        <div className="markdown-body prose prose-stone prose-lg max-w-none">
+                            <ReactMarkdown
+                                components={{
+                                    img: ({ src, alt }) => (
+                                        <MarkdownImage 
+                                            src={src} 
+                                            alt={alt} 
+                                            chapterPath={previewChapter.fileName} 
+                                            persistence={persistenceService.current} 
+                                        />
+                                    )
+                                }}
+                            >
+                                {previewChapter.markdown || ""}
+                            </ReactMarkdown>
+                        </div>
+                      </div>
+                  </div>
+                  <div className="bg-stone-50 px-6 py-4 flex items-center justify-center border-t border-stone-100 italic text-stone-400 text-xs font-serif">
+                      This is the source content extracted from the EPUB.
+                  </div>
+              </div>
+          </div>
+      )}
     </div>
   );
 };

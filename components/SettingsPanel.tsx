@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Settings, BookA, Sparkles, ScanEye, ChevronDown, ChevronRight, FileText, Server, Key, Link as LinkIcon, Cpu, PlugZap, CheckCircle2, XCircle, Globe, Check } from 'lucide-react';
+import { Settings, BookA, Sparkles, ScanEye, ChevronDown, ChevronRight, FileText, Server, Key, Link as LinkIcon, Cpu, PlugZap, CheckCircle2, XCircle, Globe, Check, FileCheck, Layers } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { AppConfig } from '../types';
 import { AiService } from '../services/geminiService';
 
@@ -88,105 +89,139 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
             </button>
 
             {showApiSettings && (
-                <div className="space-y-5 mb-8 animate-in slide-in-from-top-2">
-                    <div className="relative w-full [perspective:1000px]">
-                        <div className={`w-full transition-transform duration-700 [transform-style:preserve-3d] ${isGemini ? '[transform:rotateY(180deg)]' : ''}`}>
-                            
-                            {/* Front Side (Custom API) */}
-                            <div className={`w-full bg-[#f5f5f0] p-5 rounded-2xl border border-stone-200 flex flex-col justify-center space-y-4 [backface-visibility:hidden] ${isGemini ? 'pointer-events-none' : ''}`}>
-                                <div>
-                                    <label className="flex items-center gap-2 text-xs font-semibold text-stone-600 mb-2 uppercase tracking-wide">
-                                        <LinkIcon className="w-3.5 h-3.5"/> Base URL
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={config.baseUrl}
-                                        onChange={(e) => handleChange('baseUrl', e.target.value)}
-                                        disabled={disabled || isGemini}
-                                        placeholder="https://integrate.api.nvidia.com/v1"
-                                        className="w-full px-4 py-3 text-sm rounded-xl border border-stone-300 focus:border-stone-500 focus:ring-1 focus:ring-stone-500 outline-none font-mono text-stone-700 bg-white shadow-sm transition-all"
-                                    />
-                                </div>
-                                
-                                <div>
-                                    <label className="flex items-center gap-2 text-xs font-semibold text-stone-600 mb-2 uppercase tracking-wide">
-                                        <Cpu className="w-3.5 h-3.5"/> Model Name
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={config.modelName}
-                                        onChange={(e) => handleChange('modelName', e.target.value)}
-                                        disabled={disabled || isGemini}
-                                        placeholder="minimaxai/minimax-m2.1"
-                                        className="w-full px-4 py-3 text-sm rounded-xl border border-stone-300 focus:border-stone-500 focus:ring-1 focus:ring-stone-500 outline-none font-mono text-stone-700 bg-white shadow-sm transition-all"
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="flex items-center gap-2 text-xs font-semibold text-stone-600 mb-2 uppercase tracking-wide">
-                                        <Key className="w-3.5 h-3.5"/> API Key
-                                    </label>
-                                    <input
-                                        type="password"
-                                        value={config.apiKey}
-                                        onChange={(e) => handleChange('apiKey', e.target.value)}
-                                        disabled={disabled || isGemini}
-                                        placeholder="nvapi-..."
-                                        className="w-full px-4 py-3 text-sm rounded-xl border border-stone-300 focus:border-stone-500 focus:ring-1 focus:ring-stone-500 outline-none bg-white shadow-sm transition-all"
-                                    />
-                                </div>
-
-                                <div className="pt-3">
-                                    <button
-                                        onClick={() => {
-                                            handleChange('baseUrl', 'https://generativelanguage.googleapis.com/v1beta/openai/');
-                                            handleChange('modelName', 'gemini-3-flash-preview');
-                                            // @ts-ignore
-                                            handleChange('apiKey', process.env.GEMINI_API_KEY || '');
-                                        }}
-                                        disabled={disabled || isGemini}
-                                        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold tracking-wide transition-all bg-stone-800 text-[#f5f5f0] hover:bg-stone-900 shadow-sm"
-                                    >
-                                        <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                                        Switch to GEMINI 3.0 FLASH
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Back Side (Gemini Active) */}
-                            <div className={`absolute inset-0 w-full h-full bg-[#f5f5f0] p-5 rounded-2xl border border-stone-200 flex flex-col items-center justify-center space-y-3 [backface-visibility:hidden] [transform:rotateY(180deg)] ${!isGemini ? 'pointer-events-none' : ''}`}>
-                                <div className="flex items-center gap-2 text-stone-800 font-serif text-lg">
-                                    <Sparkles className="w-5 h-5 text-amber-600" />
-                                    <span>GEMINI 3.0 FLASH Active</span>
-                                </div>
-                                <p className="text-xs text-stone-500 text-center px-4 font-medium">
-                                    Using managed Gemini API. Configuration is hidden.
-                                </p>
-                                <button
-                                    onClick={() => {
-                                        handleChange('baseUrl', 'https://integrate.api.nvidia.com/v1');
-                                        handleChange('modelName', 'minimaxai/minimax-m2.1');
-                                        handleChange('apiKey', '');
-                                    }}
-                                    disabled={disabled || !isGemini}
-                                    className="mt-3 text-xs font-medium text-stone-500 hover:text-stone-800 underline underline-offset-4 transition-colors tracking-wide"
-                                >
-                                    Switch to Custom API
-                                </button>
-                            </div>
-                        </div>
+                <div className="space-y-6 mb-8 animate-in slide-in-from-top-2">
+                    {/* Segmented Control for API Mode */}
+                    <div className="flex p-1 bg-stone-100 rounded-xl border border-stone-200">
+                        <button
+                            onClick={() => {
+                                handleChange('baseUrl', 'https://integrate.api.nvidia.com/v1');
+                                handleChange('modelName', 'minimaxai/minimax-m2.1');
+                                handleChange('apiKey', '');
+                            }}
+                            disabled={disabled}
+                            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all relative ${!isGemini ? 'text-stone-800' : 'text-stone-500 hover:text-stone-700'}`}
+                        >
+                             {!isGemini && (
+                                <motion.div 
+                                    layoutId="api-tab"
+                                    className="absolute inset-0 bg-white shadow-sm rounded-lg border border-stone-200/50"
+                                    transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
+                                />
+                            )}
+                            <span className="relative z-10 flex items-center gap-2">
+                                <LinkIcon className="w-3.5 h-3.5" />
+                                Custom API
+                            </span>
+                        </button>
+                        <button
+                            onClick={() => {
+                                handleChange('baseUrl', 'https://generativelanguage.googleapis.com/v1beta/openai/');
+                                handleChange('modelName', 'gemini-3-flash-preview');
+                                // @ts-ignore
+                                handleChange('apiKey', process.env.GEMINI_API_KEY || '');
+                            }}
+                            disabled={disabled}
+                            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all relative ${isGemini ? 'text-stone-800' : 'text-stone-500 hover:text-stone-700'}`}
+                        >
+                            {isGemini && (
+                                <motion.div 
+                                    layoutId="api-tab"
+                                    className="absolute inset-0 bg-white shadow-sm rounded-lg border border-stone-200/50"
+                                    transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
+                                />
+                            )}
+                            <span className="relative z-10 flex items-center gap-2">
+                                <Sparkles className={`w-3.5 h-3.5 ${isGemini ? 'text-amber-500' : ''}`} />
+                                Gemini Flash
+                            </span>
+                        </button>
                     </div>
 
-                    {/* Test Connection Button */}
-                    <div className="space-y-2">
+                    {/* Mode Specific Content */}
+                    <AnimatePresence mode="wait">
+                        {!isGemini ? (
+                            <motion.div
+                                key="custom-api"
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -10 }}
+                                className="space-y-4 bg-stone-50/50 p-5 rounded-2xl border border-stone-200 shadow-inner"
+                            >
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="flex items-center gap-2 text-[10px] font-bold text-stone-500 mb-2 uppercase tracking-widest">
+                                            <LinkIcon className="w-3 h-3"/> Base URL
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={config.baseUrl}
+                                            onChange={(e) => handleChange('baseUrl', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder="https://integrate.api.nvidia.com/v1"
+                                            className="w-full px-4 py-2.5 text-sm rounded-xl border border-stone-200 focus:border-stone-400 focus:ring-1 focus:ring-stone-400 outline-none font-mono text-stone-700 bg-white shadow-sm transition-all"
+                                        />
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="flex items-center gap-2 text-[10px] font-bold text-stone-500 mb-2 uppercase tracking-widest">
+                                            <Cpu className="w-3 h-3"/> Model Name
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={config.modelName}
+                                            onChange={(e) => handleChange('modelName', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder="minimaxai/minimax-m2.1"
+                                            className="w-full px-4 py-2.5 text-sm rounded-xl border border-stone-200 focus:border-stone-400 focus:ring-1 focus:ring-stone-400 outline-none font-mono text-stone-700 bg-white shadow-sm transition-all"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="flex items-center gap-2 text-[10px] font-bold text-stone-500 mb-2 uppercase tracking-widest">
+                                            <Key className="w-3 h-3"/> API Key
+                                        </label>
+                                        <input
+                                            type="password"
+                                            value={config.apiKey}
+                                            onChange={(e) => handleChange('apiKey', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder="Enter your API Key"
+                                            className="w-full px-4 py-2.5 text-sm rounded-xl border border-stone-200 focus:border-stone-400 focus:ring-1 focus:ring-stone-400 outline-none bg-white shadow-sm transition-all"
+                                        />
+                                    </div>
+                                </div>
+                            </motion.div>
+                        ) : (
+                            <motion.div
+                                key="gemini-api"
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -10 }}
+                                className="bg-[#fcfcf9] p-6 rounded-2xl border border-stone-200 flex flex-col items-center justify-center space-y-3 shadow-inner"
+                            >
+                                <div className="p-3 bg-amber-50 rounded-full">
+                                    <Sparkles className="w-6 h-6 text-amber-600" />
+                                </div>
+                                <div className="text-center">
+                                    <h3 className="text-stone-800 font-serif text-lg font-medium">Gemini 3.0 Flash</h3>
+                                    <p className="text-xs text-stone-500 max-w-[240px] mt-1 italic font-medium leading-relaxed">
+                                        Using platform-managed API access. No additional configuration required.
+                                    </p>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    {/* Test Connection Section - Separated with Divider */}
+                    <div className="pt-4 border-t border-stone-100 flex flex-col gap-3">
                         <button
                             onClick={handleTestConnection}
-                            disabled={disabled || testStatus === 'testing' || !config.apiKey}
-                            className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold tracking-wide transition-all uppercase
+                            disabled={disabled || testStatus === 'testing' || (!config.apiKey && !isGemini)}
+                            className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold tracking-wide transition-all uppercase shadow-sm
                                 ${testStatus === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 
                                   testStatus === 'error' ? 'bg-red-50 text-red-700 border border-red-200' :
-                                  'bg-white text-stone-700 border border-stone-300 hover:bg-stone-50 active:scale-[0.98] shadow-sm'
-                                } ${disabled || !config.apiKey ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                  'bg-stone-800 text-stone-50 hover:bg-stone-900 active:scale-[0.98]'
+                                } ${disabled || (testStatus === 'testing') || (!config.apiKey && !isGemini) ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             {testStatus === 'testing' ? <PlugZap className="w-3.5 h-3.5 animate-pulse" /> : 
                              testStatus === 'success' ? <CheckCircle2 className="w-3.5 h-3.5" /> : 
@@ -194,15 +229,19 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                              <PlugZap className="w-3.5 h-3.5" />}
                             
                             {testStatus === 'testing' ? 'Testing Connection...' : 
-                             testStatus === 'success' ? 'Connection Verified' : 
-                             testStatus === 'error' ? 'Connection Failed' : 
-                             'Test API Connection'}
+                             testStatus === 'success' ? 'Service Verified' : 
+                             testStatus === 'error' ? 'Verification Failed' : 
+                             'Verify API Status'}
                         </button>
                         
                         {testStatus === 'error' && lastError && (
-                            <div className="text-[10px] text-red-500 bg-red-50 p-2 rounded border border-red-100 break-all">
+                            <motion.div 
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: 'auto' }}
+                                className="text-[10px] text-red-600 bg-red-50/50 p-3 rounded-xl border border-red-100 break-all font-mono leading-relaxed"
+                            >
                                 {lastError}
-                            </div>
+                            </motion.div>
                         )}
                     </div>
                 </div>
@@ -254,8 +293,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
         </div>
 
           {/* Feature Toggles */}
-          <div className="flex flex-col sm:flex-row gap-6 sm:items-center pt-2">
-            <label className="flex items-center gap-3 cursor-pointer group">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-stone-50 rounded-2xl border border-stone-200/60 shadow-sm transition-all hover:bg-stone-100/30">
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]">
                 <div className="relative flex items-center shrink-0">
                     <input 
                         type="checkbox" 
@@ -264,12 +303,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                         disabled={disabled}
                         className="peer sr-only"
                     />
-                    <div className="w-10 h-6 bg-stone-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
+                    <div className="w-10 h-6 bg-stone-100 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
                 </div>
-                <span className="text-sm font-medium text-stone-600 group-hover:text-stone-900 transition-colors select-none">AI Proofreading</span>
+                <div className="flex flex-col min-w-0">
+                    <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
+                        <FileCheck className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">AI Review</span>
+                    </div>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Proofreading</span>
+                </div>
             </label>
 
-            <label className="flex items-center gap-3 cursor-pointer group" title="Skip Title Page, Copyright, TOC, etc.">
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Skip Title Page, Copyright, TOC, etc.">
                 <div className="relative flex items-center shrink-0">
                     <input 
                         type="checkbox" 
@@ -278,50 +323,57 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                         disabled={disabled}
                         className="peer sr-only"
                     />
-                    <div className="w-10 h-6 bg-stone-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
+                    <div className="w-10 h-6 bg-stone-100 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
                 </div>
-                <div className="flex items-center gap-1.5 text-stone-600 group-hover:text-stone-900 transition-colors select-none">
-                    <ScanEye className="w-3.5 h-3.5 opacity-60" />
-                    <span className="text-sm font-medium">Smart Skip</span>
+                <div className="flex flex-col min-w-0">
+                    <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
+                        <ScanEye className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">Auto Skip</span>
+                    </div>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Auto Filter</span>
+                </div>
+            </label>
+
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Enable terminology and glossary system">
+                <div className="relative flex items-center shrink-0">
+                    <input 
+                        type="checkbox" 
+                        checked={config.enableGlossary}
+                        onChange={(e) => handleChange('enableGlossary', e.target.checked)}
+                        disabled={disabled}
+                        className="peer sr-only"
+                    />
+                    <div className="w-10 h-6 bg-stone-100 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
+                </div>
+                <div className="flex flex-col min-w-0">
+                    <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
+                        <BookA className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">Glossary</span>
+                    </div>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Consistency</span>
+                </div>
+            </label>
+
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Optimized for literary prose">
+                <div className="relative flex items-center shrink-0">
+                    <input 
+                        type="checkbox" 
+                        checked={config.useRecommendedPrompts}
+                        onChange={(e) => handleChange('useRecommendedPrompts', e.target.checked)}
+                        disabled={disabled}
+                        className="peer sr-only"
+                    />
+                    <div className="w-10 h-6 bg-stone-100 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-stone-400 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-200 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-stone-800 shadow-inner"></div>
+                </div>
+                <div className="flex flex-col min-w-0">
+                    <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
+                        <Sparkles className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">Lit Mode</span>
+                    </div>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Style Pros</span>
                 </div>
             </label>
           </div>
-
-        <div className="h-px bg-stone-100 w-full my-6" />
-
-        {/* Recommended Prompts Toggle Card */}
-        <div 
-            onClick={() => !disabled && handleChange('useRecommendedPrompts', !config.useRecommendedPrompts)}
-            className={`
-                relative group cursor-pointer rounded-2xl border transition-all duration-300 overflow-hidden
-                ${config.useRecommendedPrompts 
-                    ? 'border-stone-800 bg-stone-50 ring-1 ring-stone-800/10 shadow-sm' 
-                    : 'border-stone-200 bg-white hover:border-stone-300 hover:bg-[#f5f5f0]'
-                } 
-                ${disabled ? 'opacity-60 cursor-not-allowed' : ''}
-            `}
-        >
-           <div className="p-5 flex items-start gap-4">
-              <div className={`p-3 rounded-xl shrink-0 transition-colors ${config.useRecommendedPrompts ? 'bg-stone-800 text-amber-400' : 'bg-stone-100 text-stone-400 group-hover:text-stone-600 group-hover:bg-stone-200'}`}>
-                 <Sparkles className="w-4 h-4" />
-              </div>
-              <div className="flex-1 min-w-0">
-                 <div className="flex items-center justify-between mb-1.5">
-                    <span className={`font-serif text-base font-medium ${config.useRecommendedPrompts ? 'text-stone-900' : 'text-stone-700'}`}>
-                        Literary Style Mode
-                    </span>
-                    {config.useRecommendedPrompts && (
-                        <span className="shrink-0 bg-stone-200 text-stone-800 text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-widest">
-                            Active
-                        </span>
-                    )}
-                 </div>
-                 <p className={`text-xs leading-relaxed truncate ${config.useRecommendedPrompts ? 'text-stone-600' : 'text-stone-500'}`}>
-                    Optimized for Chinese literary translation.
-                 </p>
-              </div>
-           </div>
-        </div>
 
         {/* Advanced Prompts Section (Collapsible) */}
         <div className="pt-2">

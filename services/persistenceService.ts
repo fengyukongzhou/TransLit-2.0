@@ -207,6 +207,19 @@ export class PersistenceService {
     });
   }
 
+  async getImage(path: string): Promise<Blob | null> {
+    return new Promise((resolve, reject) => {
+      if (!this.db) {
+          resolve(null);
+          return;
+      }
+      const store = this.getStore(STORES.IMAGES);
+      const request = store.get(path);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
   // --- Logs ---
 
   async saveLog(log: ProcessingLog): Promise<void> {
