@@ -1,6 +1,6 @@
 
 import { AppConfig } from "../types";
-import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY, GLOSSARY_OPTIMIZER_PROMPT } from "../prompts";
+import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY, GLOSSARY_OPTIMIZER_PROMPT, INCREMENTAL_GLOSSARY_OPTIMIZER_PROMPT } from "../prompts";
 
 export class AiService {
   // Safe chunk size to avoid context limits (approx 3000 chars)
@@ -20,6 +20,20 @@ export class AiService {
           return result.translation; // translation property holds the text
       } catch (error) {
           console.error("Glossary optimization API call failed:", error);
+          throw error;
+      }
+  }
+
+  /**
+   * Cleans newly added terms against a master glossary.
+   */
+  async optimizeIncrementalGlossary(newTermsText: string, masterGlossaryText: string): Promise<string> {
+      try {
+          const prompt = `MASTER GLOSSARY:\n${masterGlossaryText || "(Empty)"}\n\nNEW CANDIDATES:\n${newTermsText}`;
+          const result = await this.generate(prompt, INCREMENTAL_GLOSSARY_OPTIMIZER_PROMPT, 0.2);
+          return result.translation;
+      } catch (error) {
+          console.error("Incremental glossary optimization failed:", error);
           throw error;
       }
   }
@@ -316,6 +330,9 @@ export class AiService {
                 await onProgress(i + 1, chunks.length, result.translation, deltaGlossary);
             }
         } catch (error) {
+            if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
+                throw error;
+            }
             console.error(`Error translating chunk ${i + 1}/${chunks.length}:`, error);
             translatedChunks[i] = chunk;
             if (onProgress) {
@@ -379,6 +396,9 @@ export class AiService {
                 await onProgress(i + 1, chunks.length, result.translation);
             }
         } catch (error) {
+            if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
+                throw error;
+            }
             console.error(`Error proofreading chunk ${i + 1}/${chunks.length}:`, error);
             proofreadChunks[i] = chunk;
             if (onProgress) {

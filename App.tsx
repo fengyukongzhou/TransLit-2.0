@@ -11,7 +11,7 @@ import SettingsPanel from './components/SettingsPanel';
 import { EpubService } from './services/epubService';
 import { AiService } from './services/geminiService';
 import { PersistenceService } from './services/persistenceService';
-import { AppStatus, AppConfig, Chapter, ProcessingLog } from './types';
+import { AppStatus, AppConfig, Chapter, ProcessingLog, SessionState } from './types';
 import { RECOMMENDED_TRANSLATION_PROMPT, RECOMMENDED_PROOFREAD_PROMPT } from './prompts';
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -156,7 +156,6 @@ const App: React.FC = () => {
   const [chapters, setChapters] = useState<Chapter[]>([]); // Added state for chapters to trigger re-renders
   const [isCleaningGlossary, setIsCleaningGlossary] = useState(false);
   
-  // Refs for services and data persistence
   const epubService = useRef(new EpubService());
   const persistenceService = useRef(new PersistenceService());
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -167,6 +166,10 @@ const App: React.FC = () => {
   const imagesRef = useRef<Record<string, Blob>>({});
   const coverPathRef = useRef<string | undefined>(undefined);
   const lastOptimizedCountRef = useRef<number>(0);
+  const lastOptimizedMapRef = useRef<Record<string, string>>({});
+  const chunksTranslatedTotalRef = useRef<number>(0);
+
+  const isWorking = [AppStatus.PARSING, AppStatus.TRANSLATING, AppStatus.PROOFREADING, AppStatus.PACKAGING].includes(status);
 
   // Initialize Persistence
   useEffect(() => {
@@ -245,44 +248,90 @@ const App: React.FC = () => {
     init();
   }, []);
 
+
   const optimizeGlossary = async (isManual: boolean = false) => {
-    const termCount = Object.keys(glossaryMap).length;
+    // Read fresh from database to avoid stale closures in the long-running process
+    const currentGlossaryMap = await persistenceService.current.loadGlossary();
+    const termCount = Object.keys(currentGlossaryMap).length;
     
-    // Skip if not enough terms to optimize (minimum 5 terms for sanity)
-    if (termCount < 5) {
-        if (isManual) addLog(`[Agent] Glossary Janitor: Not enough terms to analyze yet (Minimum 5).`, 'info');
+    // Skip if not enough terms to optimize (minimum 10 terms for actual optimization benefit)
+    if (termCount < 10) {
+        if (isManual) addLog(`[Agent] Glossary Janitor: Not enough terms to analyze yet (Minimum 10).`, 'info');
         return;
     }
 
     if (isCleaningGlossary) return;
     
     setIsCleaningGlossary(true);
-    addLog(`[Agent] Glossary Janitor: Analyzing and optimizing ${termCount} terms...`, 'process');
     
     try {
         const aiService = new AiService(config);
-        const currentText = glossaryToOutputStr(glossaryMap);
-        const optimizedText = await aiService.optimizeGlossary(currentText);
         
-        if (optimizedText && optimizedText.length > 10) {
-            const newMap = parseGlossaryStr(optimizedText);
-            const newCount = Object.keys(newMap).length;
-            const removedCount = termCount - newCount;
-            
-            await persistenceService.current.replaceGlossary(newMap);
-            const finalized = await persistenceService.current.loadGlossary();
-            
-            setGlossaryMap(finalized);
-            setLiveGlossary(glossaryToOutputStr(finalized));
-            lastOptimizedCountRef.current = newCount;
-            
-            if (removedCount > 0) {
-                addLog(`[Agent] Glossary cleaned. Removed ${removedCount} redundant entries.`, 'success');
-            } else {
-                addLog(`[Agent] Glossary verified. No noise detected.`, 'success');
+        // Incremental Logic: Only send terms that haven't been optimized yet
+        const masterTermsKeys = Object.keys(lastOptimizedMapRef.current).join(", ");
+        const newTermsMap: Record<string, string> = {};
+        
+        Object.entries(currentGlossaryMap).forEach(([k, v]) => {
+            if (!lastOptimizedMapRef.current[k]) {
+                newTermsMap[k] = v;
             }
+        });
+        
+        const newTermsText = glossaryToOutputStr(newTermsMap);
+        const newTermCount = Object.keys(newTermsMap).length;
+        
+        if (newTermCount === 0 && !isManual) {
+            setIsCleaningGlossary(false);
+            return;
+        }
+
+        addLog(`[Agent] Glossary Janitor: Reviewing ${newTermCount} new terms against baseline...`, 'process');
+        
+        // Pass baseline keys instead of full text to minimize prompt size
+        const baselineSummary = masterTermsKeys.length > 500 
+            ? masterTermsKeys.substring(0, 500) + "... (and more)" 
+            : masterTermsKeys || "(None)";
+
+        const optimizedDeltaText = await aiService.optimizeIncrementalGlossary(newTermsText, baselineSummary);
+        
+        // Create full glossary by merging optimized delta with master
+        const deltaMap = parseGlossaryStr(optimizedDeltaText);
+        
+        // REFINED MERGE LOGIC:
+        // 1. Get current state from DB
+        const liveMap = await persistenceService.current.loadGlossary();
+        
+        // 2. Remove the "Dirty" candidates we just reviewed from the live set
+        const cleanedLiveMap = { ...liveMap };
+        Object.keys(newTermsMap).forEach(k => {
+            delete cleanedLiveMap[k];
+        });
+        
+        // 3. Add the "Optimized" versions back
+        const mergedMap = { ...cleanedLiveMap, ...deltaMap };
+        
+        await persistenceService.current.replaceGlossary(mergedMap);
+        const savedMap = await persistenceService.current.loadGlossary();
+        
+        // Sync UI and internal state
+        setGlossaryMap(savedMap);
+        setLiveGlossary(glossaryToOutputStr(savedMap));
+        lastOptimizedCountRef.current = Object.keys(savedMap).length;
+        lastOptimizedMapRef.current = savedMap;
+        
+        const addedCount = Object.keys(deltaMap).length;
+        const rejectedCount = newTermCount - addedCount;
+
+        if (rejectedCount > 0) {
+            addLog(`[Agent] Glossary cleaned. Filtered ${rejectedCount} redundant entries.`, 'success');
+        } else {
+            addLog(`[Agent] Glossary updated with ${addedCount} new terms.`, 'success');
         }
     } catch (e) {
+        if (e instanceof Error && e.message === "PAUSE_SIGNAL") {
+            // Re-throw to be caught by startTranslation loop
+            throw e;
+        }
         console.error("Glossary optimization failed:", e);
         addLog(`[Agent] Glossary optimization failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
     } finally {
@@ -473,11 +522,14 @@ const App: React.FC = () => {
             : currentGlossary;
 
         const result = await aiService.translateContent(
-          chapter.markdown, 
-          'Chinese (Simplified)', 
-          effectiveSystemInstruction,
-          async (current, total, chunkResult, updatedGlossary, isFallback) => {
-              if (isFallback) {
+            chapter.markdown, 
+            'Chinese (Simplified)', 
+            effectiveSystemInstruction,
+            async (current, total, chunkResult, updatedGlossary, isFallback) => {
+                if (isPauseRequested.current) {
+                    throw new Error("PAUSE_SIGNAL");
+                }
+                if (isFallback) {
                   addLog(`  > ⚠️ API returned empty/error for part ${current}/${total} of "${chapter.title}". Kept original.`, 'error');
                   if (!chapter.fallbackChunks!.includes(current - 1)) {
                       chapter.fallbackChunks!.push(current - 1);
@@ -499,6 +551,16 @@ const App: React.FC = () => {
 
                   const termCount = updatedGlossary ? updatedGlossary.trim().split('\n').filter(l => l.trim()).length : 0;
                   addLog(`  > Translated part ${current}/${total} of "${chapter.title}"... (New Glossary: ${termCount} terms)`, 'info');
+                  
+                  // Trigger Glossary Cleaning every 10 chunks
+                  chunksTranslatedTotalRef.current++;
+                  if (config.enableGlossary && chunksTranslatedTotalRef.current % 10 === 0) {
+                      optimizeGlossary().then(async () => {
+                          const freshGlossary = await persistenceService.current.loadGlossary();
+                          currentGlossary = glossaryToOutputStr(freshGlossary);
+                      });
+                  }
+
                   if (chapter.fallbackChunks) {
                     chapter.fallbackChunks = chapter.fallbackChunks.filter(idx => idx !== current - 1);
                   }
@@ -535,10 +597,13 @@ const App: React.FC = () => {
           if (!chapter.fallbackProofreadChunks) chapter.fallbackProofreadChunks = [];
 
           const proofread = await aiService.proofreadContent(
-            chapter.translatedMarkdown!, 
-            effectiveProofreadInstruction,
-            async (current, total, chunkResult, isFallback) => {
-                if (isFallback) {
+              chapter.translatedMarkdown!, 
+              effectiveProofreadInstruction,
+              async (current, total, chunkResult, isFallback) => {
+                  if (isPauseRequested.current) {
+                      throw new Error("PAUSE_SIGNAL");
+                  }
+                  if (isFallback) {
                     addLog(`  > ⚠️ API returned empty/error for part ${current}/${total} of "${chapter.title}".`, 'error');
                     if (!chapter.fallbackProofreadChunks!.includes(current - 1)) {
                         chapter.fallbackProofreadChunks!.push(current - 1);
@@ -688,7 +753,7 @@ const App: React.FC = () => {
           progress,
           fileName: currentFile.name,
           coverPath: coverPathRef.current,
-          lastUpdated: Date.now()
+          lastUpdated: Date.now(),
       });
   };
 
@@ -837,9 +902,7 @@ const App: React.FC = () => {
         : config.proofreadInstruction;
 
       addLog(`Starting translation using ${config.modelName}...`, "info");
-      const startTimeObj = new Date();
-      addLog(`Start Time: ${startTimeObj.toLocaleTimeString()}`, "info");
-      const processStartTime = startTimeObj.getTime();
+      
       let chaptersTranslatedCount = 0;
       
       if (config.smartSkip) {
@@ -870,26 +933,14 @@ const App: React.FC = () => {
             continue;
         }
 
-        const chapterStartTime = Date.now();
-        const termsBefore = Object.keys(await persistenceService.current.loadGlossary()).length;
         runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, effectiveProofreadInstruction, [], [], runningGlossary);
-        const termsAfter = Object.keys(await persistenceService.current.loadGlossary()).length;
         
-        const chapterDuration = ((Date.now() - chapterStartTime) / 1000).toFixed(1);
         if (!currentChapter.translatedMarkdown) {
              // If it was already translated, we might not count it as "just translated" depending on processChapter logic
              // But usually it translates if needed.
         }
         chaptersTranslatedCount++;
-        addLog(`Finished Chapter ${i+1} in ${chapterDuration}s`, "success");
-        
-        // Smart Glossary Cleanup (Agent) - After each chapter if 5+ terms added
-        if (config.enableGlossary && !isPauseRequested.current && (termsAfter - termsBefore >= 5)) {
-            await optimizeGlossary();
-            // Refresh runningGlossary from optimized master
-            const freshGlossary = await persistenceService.current.loadGlossary();
-            runningGlossary = glossaryToOutputStr(freshGlossary);
-        }
+        addLog(`Finished Chapter ${i+1}`, "success");
         
         // Update progress
         const currentTotalSteps = chaptersRef.current.length * (config.enableProofreading ? 2 : 1);
@@ -908,19 +959,10 @@ const App: React.FC = () => {
       // Final Step: Packaging
       if (currentFile) {
           setProgress(100);
-          const endTimeObj = new Date();
-          const totalDurationMs = endTimeObj.getTime() - processStartTime;
-          const totalDurationMin = (totalDurationMs / 1000 / 60).toFixed(1);
-          const avgTimePerChapter = chaptersTranslatedCount > 0 
-            ? (totalDurationMs / 1000 / chaptersTranslatedCount).toFixed(1) 
-            : 0;
 
           addLog(`----------------------------------------`, "info");
           addLog(`Translation Completed!`, "success");
-          addLog(`End Time: ${endTimeObj.toLocaleTimeString()}`, "info");
-          addLog(`Duration: ${totalDurationMin} minutes`, "success");
           addLog(`Chapters Processed: ${chaptersTranslatedCount}`, "info");
-          addLog(`Average Speed: ${avgTimePerChapter}s per chapter`, "info");
           addLog(`----------------------------------------`, "info");
           
           await rebuildEpub(chaptersRef.current, config, currentFile.name);
@@ -930,6 +972,12 @@ const App: React.FC = () => {
       }
 
     } catch (error) {
+      if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
+          addLog("Process paused immediately.", "info");
+          setStatus(AppStatus.PAUSED);
+          await saveSessionState(AppStatus.PAUSED);
+          return;
+      }
       console.error(error);
       setStatus(AppStatus.ERROR);
       await saveSessionState(AppStatus.ERROR);
@@ -978,12 +1026,12 @@ const App: React.FC = () => {
             <SettingsPanel 
               config={config} 
               setConfig={setConfig} 
-              disabled={status !== AppStatus.IDLE && status !== AppStatus.COMPLETED && status !== AppStatus.ERROR} 
+              disabled={isWorking} 
             />
 
             <FileUpload 
               onFileSelect={handleFileSelect} 
-              disabled={status !== AppStatus.IDLE && status !== AppStatus.COMPLETED && status !== AppStatus.ERROR}
+              disabled={isWorking}
             />
 
             {currentFile && (
@@ -999,7 +1047,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
                     {/* Clear Button */}
-                     {(status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR) && (
+                     {!isWorking && (
                         showConfirmReset ? (
                             <div className="flex items-center gap-1 bg-stone-50 rounded-full p-1 border border-stone-200 shadow-sm">
                                 <span className="text-[11px] text-stone-500 font-medium px-2 uppercase tracking-wider">Clear?</span>
@@ -1132,14 +1180,24 @@ const App: React.FC = () => {
                 )}
              </div>
 
-             <div className="text-xs font-mono text-stone-400 bg-stone-800/50 px-3 py-1.5 rounded-full border border-stone-700/50">
-                {status !== AppStatus.IDLE && status !== AppStatus.COMPLETED && status !== AppStatus.ERROR ? (
-                   <span className="flex items-center gap-2">
-                     <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" /> 
-                     {status.charAt(0) + status.slice(1).toLowerCase()}...
-                   </span>
+             <div className="text-xs font-mono text-stone-400 bg-stone-800/50 px-3 py-1.5 rounded-full border border-stone-700/50 flex items-center gap-2 min-w-[80px] justify-center">
+                {status !== AppStatus.IDLE && status !== AppStatus.COMPLETED && status !== AppStatus.ERROR && status !== AppStatus.PAUSED ? (
+                   <>
+                     <Loader2 className="w-3 h-3 animate-spin text-amber-500" /> 
+                     <span className="text-[10px] uppercase tracking-wider font-bold text-stone-200">
+                        {status === AppStatus.PARSING ? 'Parsing' : 
+                         status === AppStatus.TRANSLATING ? 'Translating' :
+                         status === AppStatus.PROOFREADING ? 'Proofreading' :
+                         status === AppStatus.PACKAGING ? 'Packaging' : 'Working'}
+                     </span>
+                   </>
                 ) : (
-                    <span>{status.charAt(0) + status.slice(1).toLowerCase()}</span>
+                    <span className="text-[10px] uppercase tracking-wider opacity-60 font-bold">
+                        {status === AppStatus.IDLE ? 'Ready' : 
+                         status === AppStatus.PAUSED ? 'Paused' :
+                         status === AppStatus.COMPLETED ? 'Finished' :
+                         status === AppStatus.ERROR ? 'Error' : 'Idle'}
+                    </span>
                 )}
              </div>
           </div>
@@ -1347,7 +1405,7 @@ const App: React.FC = () => {
                                                         <RefreshCw className="w-3 h-3" /> {hasFallbacks ? `Retry ${detectedFallbacks.length} Chunks` : 'Re-Translate'}
                                                     </button>
                                                 )}
-                                                {config.enableProofreading && (hasProofreadFallbacks || (chapter.proofreadMarkdown && (status === AppStatus.IDLE || status === AppStatus.COMPLETED || status === AppStatus.ERROR))) && (
+                                                {config.enableProofreading && (hasProofreadFallbacks || (chapter.proofreadMarkdown && !isWorking)) && (
                                                      <button 
                                                         onClick={() => {
                                                             chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
@@ -1400,7 +1458,7 @@ const App: React.FC = () => {
                         <div className="flex items-center gap-3">
                              <button 
                                 onClick={() => optimizeGlossary(true)}
-                                disabled={isCleaningGlossary || status !== AppStatus.IDLE}
+                                disabled={isCleaningGlossary || isWorking}
                                 className={`text-[10px] px-3 py-1.5 rounded-md flex items-center gap-2 border transition-all ${
                                     isCleaningGlossary 
                                         ? 'bg-amber-950 text-amber-500 border-amber-900/50' 

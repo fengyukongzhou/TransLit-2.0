@@ -25,6 +25,15 @@ export interface ProcessingLog {
   type: 'info' | 'success' | 'error' | 'process';
 }
 
+export interface SessionState {
+  status: AppStatus;
+  config: AppConfig;
+  progress: number;
+  fileName: string;
+  coverPath?: string;
+  lastUpdated: number;
+}
+
 export enum AppStatus {
   IDLE = 'IDLE',
   PARSING = 'PARSING',

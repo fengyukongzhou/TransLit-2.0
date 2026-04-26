@@ -1,5 +1,5 @@
 
-import { AppConfig, AppStatus, Chapter, ProcessingLog } from '../types';
+import { AppConfig, AppStatus, Chapter, ProcessingLog, SessionState } from '../types';
 
 const DB_NAME = 'epub_translator_db';
 const DB_VERSION = 2;
@@ -10,15 +10,6 @@ const STORES = {
   LOGS: 'logs',
   GLOSSARY: 'glossary'
 };
-
-export interface SessionState {
-  status: AppStatus;
-  config: AppConfig;
-  progress: number;
-  fileName: string;
-  coverPath?: string;
-  lastUpdated: number;
-}
 
 export class PersistenceService {
   private db: IDBDatabase | null = null;
