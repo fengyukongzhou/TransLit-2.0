@@ -252,11 +252,11 @@ const App: React.FC = () => {
   const optimizeGlossary = async (isManual: boolean = false) => {
     // Read fresh from database to avoid stale closures in the long-running process
     const currentGlossaryMap = await persistenceService.current.loadGlossary();
+    const currentGlossaryText = glossaryToOutputStr(currentGlossaryMap);
     const termCount = Object.keys(currentGlossaryMap).length;
     
     // Skip if not enough terms to optimize (minimum 10 terms for actual optimization benefit)
-    if (termCount < 10) {
-        if (isManual) addLog(`[Agent] Glossary Janitor: Not enough terms to analyze yet (Minimum 10).`, 'info');
+    if (termCount < 10 && !isManual) {
         return;
     }
 
@@ -267,69 +267,83 @@ const App: React.FC = () => {
     try {
         const aiService = new AiService(config);
         
-        // Incremental Logic: Only send terms that haven't been optimized yet
-        const masterTermsKeys = Object.keys(lastOptimizedMapRef.current).join(", ");
-        const newTermsMap: Record<string, string> = {};
-        
-        Object.entries(currentGlossaryMap).forEach(([k, v]) => {
-            if (!lastOptimizedMapRef.current[k]) {
-                newTermsMap[k] = v;
-            }
-        });
-        
-        const newTermsText = glossaryToOutputStr(newTermsMap);
-        const newTermCount = Object.keys(newTermsMap).length;
-        
-        if (newTermCount === 0 && !isManual) {
-            setIsCleaningGlossary(false);
-            return;
-        }
-
-        addLog(`[Agent] Glossary Janitor: Reviewing ${newTermCount} new terms against baseline...`, 'process');
-        
-        // Pass baseline keys instead of full text to minimize prompt size
-        const baselineSummary = masterTermsKeys.length > 500 
-            ? masterTermsKeys.substring(0, 500) + "... (and more)" 
-            : masterTermsKeys || "(None)";
-
-        const optimizedDeltaText = await aiService.optimizeIncrementalGlossary(newTermsText, baselineSummary);
-        
-        // Create full glossary by merging optimized delta with master
-        const deltaMap = parseGlossaryStr(optimizedDeltaText);
-        
-        // REFINED MERGE LOGIC:
-        // 1. Get current state from DB
-        const liveMap = await persistenceService.current.loadGlossary();
-        
-        // 2. Remove the "Dirty" candidates we just reviewed from the live set
-        const cleanedLiveMap = { ...liveMap };
-        Object.keys(newTermsMap).forEach(k => {
-            delete cleanedLiveMap[k];
-        });
-        
-        // 3. Add the "Optimized" versions back
-        const mergedMap = { ...cleanedLiveMap, ...deltaMap };
-        
-        await persistenceService.current.replaceGlossary(mergedMap);
-        const savedMap = await persistenceService.current.loadGlossary();
-        
-        // Sync UI and internal state
-        setGlossaryMap(savedMap);
-        setLiveGlossary(glossaryToOutputStr(savedMap));
-        lastOptimizedCountRef.current = Object.keys(savedMap).length;
-        lastOptimizedMapRef.current = savedMap;
-        
-        const addedCount = Object.keys(deltaMap).length;
-        const rejectedCount = newTermCount - addedCount;
-
-        if (rejectedCount > 0) {
-            addLog(`[Agent] Glossary cleaned. Filtered ${rejectedCount} redundant entries.`, 'success');
+        if (isManual) {
+            // TWO-STEP CLEANUP: Filter by existence FIRST, then AI
+            addLog(`[Agent] Smart Cleanup: Performing deep analysis on ${termCount} terms...`, 'process');
+            const fullText = chaptersRef.current.map(c => c.markdown).join('\n');
+            const optimizedText = await aiService.smartCleanupGlossary(currentGlossaryText, fullText);
+            
+            const finalMap = parseGlossaryStr(optimizedText);
+            await persistenceService.current.replaceGlossary(finalMap);
+            setGlossaryMap(finalMap);
+            setLiveGlossary(glossaryToOutputStr(finalMap));
+            
+            const finalCount = Object.keys(finalMap).length;
+            addLog(`[Agent] Smart Cleanup finished. Result: ${finalCount} / ${termCount} terms kept.`, 'success');
         } else {
-            addLog(`[Agent] Glossary updated with ${addedCount} new terms.`, 'success');
+            // Incremental Logic: Only send terms that haven't been optimized yet
+            const masterTermsKeys = Object.keys(lastOptimizedMapRef.current).join(", ");
+            const newTermsMap: Record<string, string> = {};
+            
+            Object.entries(currentGlossaryMap).forEach(([k, v]) => {
+                if (!lastOptimizedMapRef.current[k]) {
+                    newTermsMap[k] = v;
+                }
+            });
+            
+            const newTermsText = glossaryToOutputStr(newTermsMap);
+            const newTermCount = Object.keys(newTermsMap).length;
+            
+            if (newTermCount === 0) {
+                setIsCleaningGlossary(false);
+                return;
+            }
+
+            addLog(`[Agent] Glossary Janitor: Reviewing ${newTermCount} new terms against baseline...`, 'process');
+            
+            // Pass baseline keys instead of full text to minimize prompt size
+            const baselineSummary = masterTermsKeys.length > 500 
+                ? masterTermsKeys.substring(0, 500) + "... (and more)" 
+                : masterTermsKeys || "(None)";
+
+            const optimizedDeltaText = await aiService.optimizeIncrementalGlossary(newTermsText, baselineSummary);
+            
+            // Create full glossary by merging optimized delta with master
+            const deltaMap = parseGlossaryStr(optimizedDeltaText);
+            
+            // REFINED MERGE LOGIC:
+            // 1. Get current state from DB
+            const liveMap = await persistenceService.current.loadGlossary();
+            
+            // 2. Remove the "Dirty" candidates we just reviewed from the live set
+            const cleanedLiveMap = { ...liveMap };
+            Object.keys(newTermsMap).forEach(k => {
+                delete cleanedLiveMap[k];
+            });
+            
+            // 3. Add the "Optimized" versions back
+            const mergedMap = { ...cleanedLiveMap, ...deltaMap };
+            
+            await persistenceService.current.replaceGlossary(mergedMap);
+            const savedMap = await persistenceService.current.loadGlossary();
+            
+            // Sync UI and internal state
+            setGlossaryMap(savedMap);
+            setLiveGlossary(glossaryToOutputStr(savedMap));
+            lastOptimizedCountRef.current = Object.keys(savedMap).length;
+            lastOptimizedMapRef.current = savedMap;
+            
+            const addedCount = Object.keys(deltaMap).length;
+            const rejectedCount = newTermCount - addedCount;
+
+            if (rejectedCount > 0) {
+                addLog(`[Agent] Glossary cleaned. Filtered ${rejectedCount} redundant entries.`, 'success');
+            } else {
+                addLog(`[Agent] Glossary updated with ${addedCount} new terms.`, 'success');
+            }
         }
     } catch (e) {
         if (e instanceof Error && e.message === "PAUSE_SIGNAL") {
-            // Re-throw to be caught by startTranslation loop
             throw e;
         }
         console.error("Glossary optimization failed:", e);
@@ -525,7 +539,7 @@ const App: React.FC = () => {
             chapter.markdown, 
             'Chinese (Simplified)', 
             effectiveSystemInstruction,
-            async (current, total, chunkResult, updatedGlossary, isFallback) => {
+            async (current, total, chunkResult, updatedGlossary, isFallback, stats) => {
                 if (isPauseRequested.current) {
                     throw new Error("PAUSE_SIGNAL");
                 }
@@ -549,8 +563,16 @@ const App: React.FC = () => {
                       }
                   }
 
-                  const termCount = updatedGlossary ? updatedGlossary.trim().split('\n').filter(l => l.trim()).length : 0;
-                  addLog(`  > Translated part ${current}/${total} of "${chapter.title}"... (New Glossary: ${termCount} terms)`, 'info');
+                  let glossaryInfo = '';
+                  if (stats && stats.originalCount > 0) {
+                      const dropped = stats.originalCount - stats.filteredCount;
+                      glossaryInfo = `(Glossary: ${stats.filteredCount} kept, ${dropped} dropped)`;
+                  } else {
+                      const termCount = updatedGlossary ? updatedGlossary.trim().split('\n').filter(l => l.trim()).length : 0;
+                      glossaryInfo = `(New Glossary: ${termCount} entries)`;
+                  }
+                  
+                  addLog(`  > Translated part ${current}/${total} of "${chapter.title}"... ${glossaryInfo}`, 'info');
                   
                   // Trigger Glossary Cleaning every 10 chunks
                   chunksTranslatedTotalRef.current++;
@@ -577,7 +599,8 @@ const App: React.FC = () => {
           },
           chapter.translatedChunks,
           forceTranslateIndices,
-          initialGlossaryForChapter
+          initialGlossaryForChapter,
+          chapters.slice(index + 1).map(c => c.markdown).join('\n')
         );
         chapter.translatedMarkdown = result.content;
         chapter.glossary = result.glossary;

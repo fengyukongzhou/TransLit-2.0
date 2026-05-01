@@ -237,19 +237,172 @@ export class AiService {
       }
   }
 
+  private parseGlossary(text: string): Record<string, string> {
+    const glossaryMap: Record<string, string> = {};
+    const lines = text.split('\n');
+    lines.forEach(line => {
+      // 1. Try structural format: SOURCE: xxx | TARGET: yyy
+      const structuralMatch = line.match(/SOURCE:\s*(.*?)\s*\|\s*TARGET:\s*(.*)/i);
+      if (structuralMatch) {
+          const key = structuralMatch[1].trim();
+          const value = structuralMatch[2].trim();
+          if (key && value) {
+              glossaryMap[key] = value;
+              return;
+          }
+      }
+
+      // 2. Fallback to simple format: Key: Value
+      const parts = line.split(':');
+      if (parts.length >= 2) {
+          const k = parts[0].trim();
+          const v = parts.slice(1).join(':').trim();
+          if (k && v && !k.toLowerCase().includes('source') && !k.toLowerCase().includes('target')) {
+              glossaryMap[k] = v;
+          }
+      }
+    });
+    return glossaryMap;
+  }
+
+  private glossaryMapToString(map: Record<string, string>): string {
+    return Object.entries(map)
+      .sort()
+      .map(([k, v]) => `SOURCE: ${k} | TARGET: ${v}`)
+      .join('\n');
+  }
+
+  private mergeGlossary(base: string, delta: string): string {
+    const baseMap = this.parseGlossary(base);
+    const deltaMap = this.parseGlossary(delta);
+    const merged = { ...baseMap, ...deltaMap };
+    return this.glossaryMapToString(merged);
+  }
+
+  /**
+   * Filters a glossary map based on whether terms appear in the text.
+   */
+  private filterGlossaryByInclusion(glossaryMap: Record<string, string>, text: string): Record<string, string> {
+    const filteredRecord: Record<string, string> = {};
+    const lowerText = text.toLowerCase();
+    const entries = Object.entries(glossaryMap);
+
+    entries.forEach(([key, value]) => {
+      const containsChinese = /[\u4e00-\u9fa5]/.test(key);
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      let isPresent = false;
+      if (containsChinese) {
+        isPresent = lowerText.includes(key.toLowerCase());
+      } else {
+        try {
+          const regex = new RegExp(`\\b${escapedKey}\\b`, 'i');
+          isPresent = regex.test(lowerText);
+        } catch (e) {
+          isPresent = lowerText.includes(key.toLowerCase());
+        }
+      }
+
+      if (isPresent) {
+        console.log(`[Glossary] ✅ Term "${key}" found in text.`);
+        filteredRecord[key] = value;
+      } else {
+        console.log(`[Glossary] 🗑️ Term "${key}" NOT found in text. Dropping.`);
+      }
+    });
+
+    return filteredRecord;
+  }
+
+  /**
+   * Performs a two-step cleanup: 
+   * 1. Automatic filtering based on text inclusion.
+   * 2. AI-based optimization for redundancy and quality.
+   */
+  async smartCleanupGlossary(glossaryText: string, fullText: string): Promise<string> {
+    console.log(`[Smart Cleanup] Starting two-step cleanup...`);
+    
+    // Step 1: Automatic Filter
+    const initialMap = this.parseGlossary(glossaryText);
+    const initialCount = Object.keys(initialMap).length;
+    
+    console.log(`[Smart Cleanup] Step 1: Automatic inclusion check against ${initialCount} terms...`);
+    const autoFilteredMap = this.filterGlossaryByInclusion(initialMap, fullText);
+    const autoFilteredCount = Object.keys(autoFilteredMap).length;
+    console.log(`[Smart Cleanup] Step 1 complete. Kept ${autoFilteredCount}/${initialCount} terms.`);
+    
+    const intermediateText = this.glossaryMapToString(autoFilteredMap);
+    if (autoFilteredCount === 0) return "";
+
+    // Step 2: AI Optimization
+    console.log(`[Smart Cleanup] Step 2: AI optimization for quality and redundancy...`);
+    try {
+        const optimizedText = await this.optimizeGlossary(intermediateText);
+        const finalMap = this.parseGlossary(optimizedText);
+        console.log(`[Smart Cleanup] Step 2 complete. AI refined it to ${Object.keys(finalMap).length} terms.`);
+        return optimizedText;
+    } catch (error) {
+        console.warn(`[Smart Cleanup] Step 2 (AI) failed, returning automatically filtered results.`, error);
+        return intermediateText;
+    }
+  }
+
+  /**
+   * Filters the delta glossary to only include terms that appear in the posterior text
+   * or are already present in the current glossary.
+   */
+  private filterDeltaGlossary(delta: string, current: string, posteriorText: string): { filtered: string, originalCount: number, filteredCount: number } {
+    if (!delta) return { filtered: "", originalCount: 0, filteredCount: 0 };
+    if (!posteriorText) {
+        const map = this.parseGlossary(delta);
+        const count = Object.keys(map).length;
+        return { filtered: delta, originalCount: count, filteredCount: count };
+    }
+    
+    const deltaMap = this.parseGlossary(delta);
+    const currentMap = this.parseGlossary(current);
+    
+    const deltaEntries = Object.entries(deltaMap);
+    const originalCount = deltaEntries.length;
+
+    if (originalCount > 0) {
+      console.log(`[Glossary Filter] AI suggested ${originalCount} potential terms. Checking against future text...`);
+    }
+
+    const filteredMap = this.filterGlossaryByInclusion(deltaMap, posteriorText);
+    
+    // Ensure we keep terms that are already in the current glossary for consistency
+    Object.entries(deltaMap).forEach(([key, value]) => {
+      if (currentMap[key]) {
+        filteredMap[key] = value;
+      }
+    });
+
+    const filteredCount = Object.keys(filteredMap).length;
+    if (originalCount > 0) {
+      console.log(`[Glossary Filter] Result: Kept ${filteredCount} out of ${originalCount} suggested terms.`);
+    }
+
+    return {
+        filtered: this.glossaryMapToString(filteredMap),
+        originalCount,
+        filteredCount
+    };
+  }
+
   async translateContent(
     content: string, 
     targetLanguage: string, 
     systemInstruction: string,
-    onProgress?: (current: number, total: number, chunkResult: string, updatedGlossary?: string, isFallback?: boolean) => Promise<void>,
+    onProgress?: (current: number, total: number, chunkResult: string, updatedGlossary?: string, isFallback?: boolean, stats?: { originalCount: number, filteredCount: number }) => Promise<void>,
     existingChunks: string[] = [],
     indicesToRetry: number[] = [],
-    initialGlossary: string = ""
+    initialGlossary: string = "",
+    fullPosteriorText: string = ""
   ): Promise<{ content: string; glossary: string }> {
     
     const chunks = this.splitTextIntoChunks(content);
     const translatedChunks: string[] = [...existingChunks];
-    const chunkGlossaries: string[] = [];
 
     // Ensure array is large enough
     while (translatedChunks.length < chunks.length) {
@@ -257,40 +410,6 @@ export class AiService {
     }
 
     let currentGlossary = initialGlossary;
-
-    const mergeGlossary = (base: string, delta: string) => {
-        const baseMap: Record<string, string> = {};
-        const parse = (s: string) => {
-            s.split('\n').forEach(line => {
-                // 1. Try structural format: SOURCE: xxx | TARGET: yyy
-                const structuralMatch = line.match(/SOURCE:\s*(.*?)\s*\|\s*TARGET:\s*(.*)/i);
-                if (structuralMatch) {
-                    const key = structuralMatch[1].trim();
-                    const value = structuralMatch[2].trim();
-                    if (key && value) {
-                        baseMap[key] = value;
-                        return;
-                    }
-                }
-
-                // 2. Fallback to simple format: Key: Value
-                const parts = line.split(':');
-                if (parts.length >= 2) {
-                    const k = parts[0].trim();
-                    const v = parts.slice(1).join(':').trim();
-                    if (k && v && !k.toLowerCase().includes('source') && !k.toLowerCase().includes('target')) {
-                        baseMap[k] = v;
-                    }
-                }
-            });
-        };
-        parse(base);
-        parse(delta);
-        return Object.entries(baseMap)
-            .sort()
-            .map(([k, v]) => `SOURCE: ${k} | TARGET: ${v}`)
-            .join('\n');
-    };
 
     const glossaryPart = this.config.enableGlossary ? `\n\n${TRANSLATION_PROMPT_GLOSSARY}` : '';
     const formatInstruction = this.config.enableGlossary 
@@ -320,16 +439,28 @@ export class AiService {
         try {
             const result = await this.generate(prompt, chunkInstruction, 0.3);
             translatedChunks[i] = result.translation;
-            const deltaGlossary = result.glossary || "";
+            let deltaGlossary = result.glossary || "";
+            let stats = { originalCount: 0, filteredCount: 0 };
+            
+            // AUTOMATIC FILTERING: If term won't appear in future, don't pollute the glossary
+            if (this.config.enableGlossary && deltaGlossary) {
+                const chapterPosterior = chunks.slice(i + 1).join('\n');
+                const combinedPosterior = chapterPosterior + '\n' + fullPosteriorText;
+                const filterResult = this.filterDeltaGlossary(deltaGlossary, currentGlossary, combinedPosterior);
+                deltaGlossary = filterResult.filtered;
+                stats = { originalCount: filterResult.originalCount, filteredCount: filterResult.filteredCount };
+            }
+
             if (deltaGlossary) {
-                currentGlossary = mergeGlossary(currentGlossary, deltaGlossary);
+                currentGlossary = this.mergeGlossary(currentGlossary, deltaGlossary);
             }
             
             if (onProgress) {
                 // We pass deltaGlossary to onProgress so UI/DB update can see the new terms
-                await onProgress(i + 1, chunks.length, result.translation, deltaGlossary);
+                await onProgress(i + 1, chunks.length, result.translation, deltaGlossary, false, stats);
             }
         } catch (error) {
+
             if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
                 throw error;
             }
