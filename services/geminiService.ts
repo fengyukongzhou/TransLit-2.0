@@ -56,19 +56,12 @@ export class AiService {
       const errString = String(error) + (typeof error === 'object' ? JSON.stringify(error) : '');
       const isRateLimit = errString.includes('429');
       const isAuthError = errString.includes('401') || errString.includes('403');
-      const isTimeout = errString.includes('timed out') || errString.includes('AbortError') || errString.toLowerCase().includes('timeout');
 
       if (isAuthError) throw error; // Never retry auth errors
 
-      // Actively cut off hanging deadlocks by preventing blind retries on true timeouts.
-      if (isTimeout) {
-          console.warn("API timeout detected. Cutting off to prevent deadlock and give control back to user.");
-          throw error; 
-      }
-
-      const isEmptyOrBadRequest = errString.includes('400') || errString.includes('empty response') || errString.includes('502') || errString.includes('504');
+      const isEmptyOrBadRequest = errString.includes('400') || errString.includes('empty response');
       
-      // Allow exactly 1 retry for empty responses or bad requests/gateway timeouts.
+      // Allow exactly 1 retry for empty responses or 400 errors.
       // Since default retries is 3, if retries <= 2, we've already retried once.
       if (isEmptyOrBadRequest && retries <= 2) {
           throw error;
@@ -202,41 +195,28 @@ export class AiService {
             temperature: temperature
         };
 
-        const abortController = new AbortController();
-        const timeoutId = setTimeout(() => abortController.abort(), 90000); // 90s timeout
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${this.config.apiKey}`
+            },
+            body: JSON.stringify(body)
+        });
 
-        try {
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${this.config.apiKey}`
-                },
-                body: JSON.stringify(body),
-                signal: abortController.signal
-            });
-
-            if (!response.ok) {
-                const errText = await response.text();
-                throw new Error(`API Error ${response.status}: ${errText}`);
-            }
-
-            const data = await response.json();
-            const content = data.choices?.[0]?.message?.content;
-
-            if (!content) {
-                 throw new Error("Received empty response from API");
-            }
-            
-            return this.parseResponse(content);
-        } catch (e: any) {
-            if (e.name === 'AbortError') {
-                throw new Error("API request timed out (90s)");
-            }
-            throw e;
-        } finally {
-            clearTimeout(timeoutId);
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`API Error ${response.status}: ${errText}`);
         }
+
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+
+        if (!content) {
+             throw new Error("Received empty response from API");
+        }
+        
+        return this.parseResponse(content);
       };
 
       return this.retry(operation);
@@ -489,15 +469,15 @@ export class AiService {
                 await onProgress(i + 1, chunks.length, result.translation, deltaGlossary, false, stats);
             }
         } catch (error) {
+
             if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
                 throw error;
             }
             console.error(`Error translating chunk ${i + 1}/${chunks.length}:`, error);
-            // By throwing the error instead of falling back to the original text,
-            // the pipeline will cleanly stop and set AppStatus.ERROR. 
-            // The user can then click "Resume Translation", which will correctly
-            // re-attempt this empty chunk instead of being stuck with English text.
-            throw error;
+            translatedChunks[i] = chunk;
+            if (onProgress) {
+                await onProgress(i + 1, chunks.length, chunk, "", true);
+            }
         }
     };
 
@@ -560,7 +540,10 @@ export class AiService {
                 throw error;
             }
             console.error(`Error proofreading chunk ${i + 1}/${chunks.length}:`, error);
-            throw error;
+            proofreadChunks[i] = chunk;
+            if (onProgress) {
+                await onProgress(i + 1, chunks.length, chunk, true);
+            }
         }
     };
 
