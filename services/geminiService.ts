@@ -56,12 +56,19 @@ export class AiService {
       const errString = String(error) + (typeof error === 'object' ? JSON.stringify(error) : '');
       const isRateLimit = errString.includes('429');
       const isAuthError = errString.includes('401') || errString.includes('403');
+      const isTimeout = errString.includes('timed out') || errString.includes('AbortError') || errString.toLowerCase().includes('timeout');
 
       if (isAuthError) throw error; // Never retry auth errors
 
-      const isEmptyOrBadRequest = errString.includes('400') || errString.includes('empty response');
+      // Actively cut off hanging deadlocks by preventing blind retries on true timeouts.
+      if (isTimeout) {
+          console.warn("API timeout detected. Cutting off to prevent deadlock and give control back to user.");
+          throw error; 
+      }
+
+      const isEmptyOrBadRequest = errString.includes('400') || errString.includes('empty response') || errString.includes('502') || errString.includes('504');
       
-      // Allow exactly 1 retry for empty responses or 400 errors.
+      // Allow exactly 1 retry for empty responses or bad requests/gateway timeouts.
       // Since default retries is 3, if retries <= 2, we've already retried once.
       if (isEmptyOrBadRequest && retries <= 2) {
           throw error;
@@ -196,7 +203,7 @@ export class AiService {
         };
 
         const abortController = new AbortController();
-        const timeoutId = setTimeout(() => abortController.abort(), 60000); // 60s timeout
+        const timeoutId = setTimeout(() => abortController.abort(), 90000); // 90s timeout
 
         try {
             const response = await fetch(url, {
@@ -224,7 +231,7 @@ export class AiService {
             return this.parseResponse(content);
         } catch (e: any) {
             if (e.name === 'AbortError') {
-                throw new Error("API request timed out (60s)");
+                throw new Error("API request timed out (90s)");
             }
             throw e;
         } finally {
