@@ -195,28 +195,41 @@ export class AiService {
             temperature: temperature
         };
 
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${this.config.apiKey}`
-            },
-            body: JSON.stringify(body)
-        });
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 60000); // 60s timeout
 
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`API Error ${response.status}: ${errText}`);
+        try {
+            const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${this.config.apiKey}`
+                },
+                body: JSON.stringify(body),
+                signal: abortController.signal
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`API Error ${response.status}: ${errText}`);
+            }
+
+            const data = await response.json();
+            const content = data.choices?.[0]?.message?.content;
+
+            if (!content) {
+                 throw new Error("Received empty response from API");
+            }
+            
+            return this.parseResponse(content);
+        } catch (e: any) {
+            if (e.name === 'AbortError') {
+                throw new Error("API request timed out (60s)");
+            }
+            throw e;
+        } finally {
+            clearTimeout(timeoutId);
         }
-
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content;
-
-        if (!content) {
-             throw new Error("Received empty response from API");
-        }
-        
-        return this.parseResponse(content);
       };
 
       return this.retry(operation);
@@ -281,8 +294,9 @@ export class AiService {
 
   /**
    * Filters a glossary map based on whether terms appear in the text.
+   * @param minOccurrences Minimum number of times the term must appear to be kept.
    */
-  private filterGlossaryByInclusion(glossaryMap: Record<string, string>, text: string): Record<string, string> {
+  public filterGlossaryByInclusion(glossaryMap: Record<string, string>, text: string, minOccurrences: number = 1): Record<string, string> {
     const filteredRecord: Record<string, string> = {};
     const lowerText = text.toLowerCase();
     const entries = Object.entries(glossaryMap);
@@ -291,23 +305,29 @@ export class AiService {
       const containsChinese = /[\u4e00-\u9fa5]/.test(key);
       const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       
-      let isPresent = false;
+      let count = 0;
       if (containsChinese) {
-        isPresent = lowerText.includes(key.toLowerCase());
+        // String splitting method to count occurrences in Chinese
+        const lowerKey = key.toLowerCase();
+        count = text.toLowerCase().split(lowerKey).length - 1;
       } else {
         try {
-          const regex = new RegExp(`\\b${escapedKey}\\b`, 'i');
-          isPresent = regex.test(lowerText);
+          // Use global regex to count word boundary matches for non-Chinese text
+          const regex = new RegExp(`\\b${escapedKey}\\b`, 'gi');
+          const matches = lowerText.match(regex);
+          count = matches ? matches.length : 0;
         } catch (e) {
-          isPresent = lowerText.includes(key.toLowerCase());
+          // Fallback if regex fails for some reason
+          const lowerKey = key.toLowerCase();
+          count = text.toLowerCase().split(lowerKey).length - 1;
         }
       }
 
-      if (isPresent) {
-        console.log(`[Glossary] ✅ Term "${key}" found in text.`);
+      if (count >= minOccurrences) {
+        console.log(`[Glossary] ✅ Term "${key}" kept (found ${count} times).`);
         filteredRecord[key] = value;
       } else {
-        console.log(`[Glossary] 🗑️ Term "${key}" NOT found in text. Dropping.`);
+        console.log(`[Glossary] 🗑️ Term "${key}" dropped (found ${count} times, need ${minOccurrences}).`);
       }
     });
 
@@ -316,18 +336,20 @@ export class AiService {
 
   /**
    * Performs a two-step cleanup: 
-   * 1. Automatic filtering based on text inclusion.
+   * 1. Automatic filtering based on text inclusion (min 2 occurrences).
    * 2. AI-based optimization for redundancy and quality.
+   * @param referenceText The text to check against (usually posterior text).
    */
-  async smartCleanupGlossary(glossaryText: string, fullText: string): Promise<string> {
-    console.log(`[Smart Cleanup] Starting two-step cleanup...`);
+  async smartCleanupGlossary(glossaryText: string, referenceText: string): Promise<string> {
+    console.log(`[Smart Cleanup] Starting two-step cleanup (Threshold: 2+ occurrences in future text)...`);
     
     // Step 1: Automatic Filter
     const initialMap = this.parseGlossary(glossaryText);
     const initialCount = Object.keys(initialMap).length;
     
-    console.log(`[Smart Cleanup] Step 1: Automatic inclusion check against ${initialCount} terms...`);
-    const autoFilteredMap = this.filterGlossaryByInclusion(initialMap, fullText);
+    // Manual cleanup uses minOccurrences = 1 as per user request to unify logic
+    console.log(`[Smart Cleanup] Step 1: Filtering terms that appear less than 1 time in reference text...`);
+    const autoFilteredMap = this.filterGlossaryByInclusion(initialMap, referenceText, 1);
     const autoFilteredCount = Object.keys(autoFilteredMap).length;
     console.log(`[Smart Cleanup] Step 1 complete. Kept ${autoFilteredCount}/${initialCount} terms.`);
     
@@ -460,15 +482,15 @@ export class AiService {
                 await onProgress(i + 1, chunks.length, result.translation, deltaGlossary, false, stats);
             }
         } catch (error) {
-
             if (error instanceof Error && error.message === "PAUSE_SIGNAL") {
                 throw error;
             }
             console.error(`Error translating chunk ${i + 1}/${chunks.length}:`, error);
-            translatedChunks[i] = chunk;
-            if (onProgress) {
-                await onProgress(i + 1, chunks.length, chunk, "", true);
-            }
+            // By throwing the error instead of falling back to the original text,
+            // the pipeline will cleanly stop and set AppStatus.ERROR. 
+            // The user can then click "Resume Translation", which will correctly
+            // re-attempt this empty chunk instead of being stuck with English text.
+            throw error;
         }
     };
 
@@ -531,10 +553,7 @@ export class AiService {
                 throw error;
             }
             console.error(`Error proofreading chunk ${i + 1}/${chunks.length}:`, error);
-            proofreadChunks[i] = chunk;
-            if (onProgress) {
-                await onProgress(i + 1, chunks.length, chunk, true);
-            }
+            throw error;
         }
     };
 

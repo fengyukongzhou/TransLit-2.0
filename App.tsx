@@ -168,6 +168,8 @@ const App: React.FC = () => {
   const lastOptimizedCountRef = useRef<number>(0);
   const lastOptimizedMapRef = useRef<Record<string, string>>({});
   const chunksTranslatedTotalRef = useRef<number>(0);
+  const activeChapterIndexRef = useRef<number>(-1);
+  const activeChunkIndexRef = useRef<number>(0);
 
   const isWorking = [AppStatus.PARSING, AppStatus.TRANSLATING, AppStatus.PROOFREADING, AppStatus.PACKAGING].includes(status);
 
@@ -270,8 +272,32 @@ const App: React.FC = () => {
         if (isManual) {
             // TWO-STEP CLEANUP: Filter by existence FIRST, then AI
             addLog(`[Agent] Smart Cleanup: Performing deep analysis on ${termCount} terms...`, 'process');
-            const fullText = chaptersRef.current.map(c => c.markdown).join('\n');
-            const optimizedText = await aiService.smartCleanupGlossary(currentGlossaryText, fullText);
+            
+            // Calculate Posterior Text (Current position to end of book)
+            let referenceText = "";
+            const currentIdx = activeChapterIndexRef.current;
+            
+            if (currentIdx !== -1) {
+                // Current Chapter (from current translation point)
+                const currentChapter = chaptersRef.current[currentIdx];
+                const chapterChunks = currentChapter.markdown.split(/\n{2,}/);
+                
+                // If translation is in progress, we can be more precise
+                const startChunk = (isWorking && currentIdx === activeChapterIndexRef.current) ? activeChunkIndexRef.current : 0;
+                const remainingChapterText = chapterChunks.slice(startChunk).join('\n');
+                
+                // All future chapters
+                const futureChaptersText = chaptersRef.current.slice(currentIdx + 1).map(c => c.markdown).join('\n');
+                
+                referenceText = remainingChapterText + "\n" + futureChaptersText;
+            }
+
+            // Fallback: If no context or reference text found, use full book (safety)
+            if (!referenceText.trim()) {
+                referenceText = chaptersRef.current.map(c => c.markdown).join('\n');
+            }
+
+            const optimizedText = await aiService.smartCleanupGlossary(currentGlossaryText, referenceText);
             
             const finalMap = parseGlossaryStr(optimizedText);
             await persistenceService.current.replaceGlossary(finalMap);
@@ -283,23 +309,49 @@ const App: React.FC = () => {
         } else {
             // Incremental Logic: Only send terms that haven't been optimized yet
             const masterTermsKeys = Object.keys(lastOptimizedMapRef.current).join(", ");
-            const newTermsMap: Record<string, string> = {};
+            const candidatesMap: Record<string, string> = {};
             
             Object.entries(currentGlossaryMap).forEach(([k, v]) => {
                 if (!lastOptimizedMapRef.current[k]) {
-                    newTermsMap[k] = v;
+                    candidatesMap[k] = v;
                 }
             });
             
-            const newTermsText = glossaryToOutputStr(newTermsMap);
-            const newTermCount = Object.keys(newTermsMap).length;
-            
-            if (newTermCount === 0) {
+            const candidateCount = Object.keys(candidatesMap).length;
+            if (candidateCount === 0) {
                 setIsCleaningGlossary(false);
                 return;
             }
 
-            addLog(`[Agent] Glossary Janitor: Reviewing ${newTermCount} new terms against baseline...`, 'process');
+            // Calculate Posterior Text for filtering candidates
+            let referenceText = "";
+            const currentIdx = activeChapterIndexRef.current;
+            if (currentIdx !== -1) {
+                const currentChapter = chaptersRef.current[currentIdx];
+                const chapterChunks = currentChapter.markdown.split(/\n{2,}/);
+                const startChunk = activeChunkIndexRef.current; // Use current translation point
+                const remainingChapterText = chapterChunks.slice(startChunk).join('\n');
+                const futureChaptersText = chaptersRef.current.slice(currentIdx + 1).map(c => c.markdown).join('\n');
+                referenceText = remainingChapterText + "\n" + futureChaptersText;
+            }
+
+            // Step 1: Pre-filter candidates by inclusion in future text (min 1 occurrence)
+            let filteredCandidatesMap = candidatesMap;
+            if (referenceText.trim()) {
+                filteredCandidatesMap = aiService.filterGlossaryByInclusion(candidatesMap, referenceText, 1);
+            }
+            
+            const newTermsText = glossaryToOutputStr(filteredCandidatesMap);
+            const filteredCount = Object.keys(filteredCandidatesMap).length;
+            
+            if (filteredCount === 0) {
+                // If all new terms were dropped by filtering, we still mark the originals as "reviewed"
+                lastOptimizedMapRef.current = { ...lastOptimizedMapRef.current, ...candidatesMap };
+                setIsCleaningGlossary(false);
+                return;
+            }
+
+            addLog(`[Agent] Glossary Janitor: Reviewing ${filteredCount} future-relevant terms (Dropped ${candidateCount - filteredCount})...`, 'process');
             
             // Pass baseline keys instead of full text to minimize prompt size
             const baselineSummary = masterTermsKeys.length > 500 
@@ -317,7 +369,7 @@ const App: React.FC = () => {
             
             // 2. Remove the "Dirty" candidates we just reviewed from the live set
             const cleanedLiveMap = { ...liveMap };
-            Object.keys(newTermsMap).forEach(k => {
+            Object.keys(candidatesMap).forEach(k => {
                 delete cleanedLiveMap[k];
             });
             
@@ -334,7 +386,7 @@ const App: React.FC = () => {
             lastOptimizedMapRef.current = savedMap;
             
             const addedCount = Object.keys(deltaMap).length;
-            const rejectedCount = newTermCount - addedCount;
+            const rejectedCount = candidateCount - addedCount;
 
             if (rejectedCount > 0) {
                 addLog(`[Agent] Glossary cleaned. Filtered ${rejectedCount} redundant entries.`, 'success');
@@ -540,6 +592,9 @@ const App: React.FC = () => {
             'Chinese (Simplified)', 
             effectiveSystemInstruction,
             async (current, total, chunkResult, updatedGlossary, isFallback, stats) => {
+                activeChapterIndexRef.current = index;
+                activeChunkIndexRef.current = current;
+
                 if (isPauseRequested.current) {
                     throw new Error("PAUSE_SIGNAL");
                 }
