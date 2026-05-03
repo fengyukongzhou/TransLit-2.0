@@ -228,13 +228,13 @@ const App: React.FC = () => {
                          addLog("Download link ready.", "success");
                      } catch (genError) {
                          console.error("Failed to regenerate EPUB on restore:", genError);
-                         addLog("Failed to regenerate download link. Please click 'Translate Again' or reset.", "error");
+                         addLog("Failed to regenerate download link. Please click 'Package Again' or reset.", "error");
                          setStatus(AppStatus.ERROR); // Fallback so they can try again
                      }
 
                 } else if (session.status !== AppStatus.IDLE) {
                      setStatus(AppStatus.ERROR); // Use ERROR state to show "Resume" button
-                     addLog("Restored interrupted session. Click 'Resume Translation' to continue.", "info");
+                     addLog("Restored interrupted session. Click the Start button to continue.", "info");
                 }
                 
                 setRestoredSession(true);
@@ -1063,6 +1063,45 @@ const App: React.FC = () => {
     }
   };
 
+  const getActionText = () => {
+      const hasPendingTranslation = chapters.some(c => 
+          c.markdown && c.markdown.trim().length >= 10 && !c.isSkippable && !c.isReference && !c.translatedMarkdown
+      );
+      const hasPendingProofread = config.enableProofreading && chapters.some(c => 
+          c.markdown && c.markdown.trim().length >= 10 && !c.isSkippable && !c.isReference && c.translatedMarkdown && !c.proofreadMarkdown
+      );
+      const hasAnyFallbacks = chapters.some(c => 
+          (c.fallbackChunks && c.fallbackChunks.length > 0) || 
+          (config.enableProofreading && c.fallbackProofreadChunks && c.fallbackProofreadChunks.length > 0)
+      );
+
+      if (status === AppStatus.COMPLETED) {
+          if (hasAnyFallbacks) return "Retry Failed Chunks";
+          if (hasPendingTranslation) return "Resume Translation";
+          if (hasPendingProofread) return "Start Proofreading";
+          return "Package Again";
+      }
+      
+      if (status === AppStatus.ERROR) {
+          if (hasPendingTranslation) return "Resume Translation";
+          if (hasPendingProofread) return "Resume Proofreading";
+          if (hasAnyFallbacks) return "Retry Failed Chunks";
+          return "Start Processing";
+      }
+
+      if (status === AppStatus.IDLE || status === AppStatus.PAUSED) {
+          if (chapters.length > 0) {
+              if (hasPendingTranslation) return "Resume Translation";
+              if (hasPendingProofread) return "Resume Proofreading";
+              if (hasAnyFallbacks) return "Retry Failed Chunks";
+              return "Package Again";
+          }
+          return "Start Translation";
+      }
+      
+      return "Start Processing";
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#f5f5f0]">
       {/* Header */}
@@ -1161,7 +1200,7 @@ const App: React.FC = () => {
                         onClick={startProcessing}
                         className="flex-1 bg-stone-800 hover:bg-stone-900 text-[#f5f5f0] px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5"
                     >
-                        {chapters.length > 0 ? "Resume Translation" : "Start Translation"}
+                        {getActionText()}
                     </button>
                     )}
 
@@ -1181,7 +1220,7 @@ const App: React.FC = () => {
                         onClick={startProcessing}
                         className="flex-1 bg-amber-700 hover:bg-amber-800 text-white px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5 flex items-center justify-center gap-2"
                     >
-                        <RefreshCw className="w-4 h-4" /> Resume Translation
+                        <RefreshCw className="w-4 h-4" /> {getActionText()}
                     </button>
                     )}
                     
@@ -1191,7 +1230,7 @@ const App: React.FC = () => {
                             onClick={startProcessing}
                             className="flex-1 bg-stone-800 hover:bg-stone-900 text-[#f5f5f0] px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5"
                         >
-                            Translate Again
+                            {getActionText()}
                         </button>
                     )}
                  </div>
@@ -1205,7 +1244,7 @@ const App: React.FC = () => {
                         <span className="font-serif text-base font-medium">Process Paused</span>
                         <span className="text-amber-700/80 leading-relaxed">
                             The process has been paused by the user. 
-                            Your progress is safely saved. Click "Resume Translation" to continue exactly where you left off.
+                            Your progress is safely saved. Click "{getActionText()}" to continue exactly where you left off.
                         </span>
                     </div>
                 </div>
@@ -1215,10 +1254,10 @@ const App: React.FC = () => {
                 <div className="bg-red-50 border border-red-100 text-red-800 p-5 rounded-2xl flex items-start gap-4 text-sm shadow-sm">
                     <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-red-600" />
                     <div className="flex flex-col gap-1.5">
-                        <span className="font-serif text-base font-medium">Process Paused</span>
+                        <span className="font-serif text-base font-medium">Process Error</span>
                         <span className="text-red-700/80 leading-relaxed">
                             The process was interrupted or encountered an error. 
-                            Your progress has been saved. Click "Resume Translation" to continue from the last saved chapter.
+                            Your progress has been saved. Click "{getActionText()}" to continue from the last saved chapter.
                         </span>
                     </div>
                 </div>
@@ -1483,7 +1522,7 @@ const App: React.FC = () => {
                                                         <RefreshCw className="w-3 h-3" /> {hasFallbacks ? `Retry ${detectedFallbacks.length} Chunks` : 'Re-Translate'}
                                                     </button>
                                                 )}
-                                                {config.enableProofreading && (hasProofreadFallbacks || (chapter.proofreadMarkdown && !isWorking)) && (
+                                                {config.enableProofreading && (hasProofreadFallbacks || ((chapter.proofreadMarkdown || chapter.translatedMarkdown) && !isWorking)) && (
                                                      <button 
                                                         onClick={() => {
                                                             chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
@@ -1499,7 +1538,7 @@ const App: React.FC = () => {
                                                                 : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
                                                         }`}
                                                     >
-                                                        <RefreshCw className="w-3 h-3" /> {hasProofreadFallbacks ? `Proof Retry ${detectedProofreadFallbacks.length}` : 'Re-Proofread'}
+                                                        <RefreshCw className="w-3 h-3" /> {hasProofreadFallbacks ? `Proof Retry ${detectedProofreadFallbacks.length}` : chapter.proofreadMarkdown ? 'Re-Proofread' : 'Start Proofread'}
                                                     </button>
                                                 )}
                                             </div>
