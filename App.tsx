@@ -576,11 +576,19 @@ const App: React.FC = () => {
         if (!chapter.chunkGlossaries) chapter.chunkGlossaries = [];
         
         // Find best starting glossary for retries or resume
-        const startIndex = forceTranslateIndices.length > 0 
-            ? forceTranslateIndices[0] 
-            : chapter.translatedChunks.findIndex(c => !c);
+        const firstNullIndex = (chapter.translatedChunks || []).findIndex(c => !c);
+        const firstRetryIndex = forceTranslateIndices.length > 0 ? forceTranslateIndices[0] : -1;
         
-        const initialGlossaryForChapter = (startIndex > 0 && chapter.chunkGlossaries[startIndex - 1]) 
+        let startIndex = -1;
+        if (firstNullIndex !== -1 && firstRetryIndex !== -1) {
+            startIndex = Math.min(firstNullIndex, firstRetryIndex);
+        } else if (firstNullIndex !== -1) {
+            startIndex = firstNullIndex;
+        } else {
+            startIndex = firstRetryIndex;
+        }
+        
+        const initialGlossaryForChapter = (startIndex > 0 && chapter.chunkGlossaries && chapter.chunkGlossaries[startIndex - 1]) 
             ? chapter.chunkGlossaries[startIndex - 1] 
             : currentGlossary;
 
@@ -717,11 +725,20 @@ const App: React.FC = () => {
             effectiveSystemInstruction = config.systemInstruction.replace(/\[SOURCE_LANG\]/g, localizedSource);
         }
             
-        const failedIndices = chapter.fallbackChunks || [];
-        // If still no failed indices, do we retry all? 
-        // Better to show an info log
-        if (failedIndices.length === 0 && chapter.translatedMarkdown) {
-            addLog(`Chapter "${chapter.title}" seems fully translated. Retrying the whole chapter for consistency...`, 'info');
+        let failedIndices = [...(chapter.fallbackChunks || [])];
+        if (config.enableProofreading && chapter.fallbackProofreadChunks) {
+            chapter.fallbackProofreadChunks.forEach(idx => {
+                if (!failedIndices.includes(idx)) failedIndices.push(idx);
+            });
+        }
+        failedIndices.sort((a, b) => a - b);
+        
+        // If still no failed indices, it means user wants a FULL re-translation (the button says "Re-Translate")
+        if (failedIndices.length === 0 && (chapter.translatedMarkdown || chapter.proofreadMarkdown)) {
+            addLog(`Chapter "${chapter.title}" requested for full re-translation.`, 'info');
+            // Force ALL chunks to be retried
+            const sourceChunks = aiService.splitTextIntoChunks(chapter.markdown, config.enableProofreading ? 1800 : undefined);
+            failedIndices = sourceChunks.map((_, i) => i);
         }
         
         // Find most recent glossary before this chapter
@@ -953,7 +970,18 @@ const App: React.FC = () => {
             continue;
         }
 
-        runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, [], runningGlossary);
+        // AUTO-RETRY logic: If chapter has fallbacks, include them in the indices to retry
+        // This makes the global "Retry Failed Chunks" button work as expected.
+        const chapterFallbacks = [...(currentChapter.fallbackChunks || [])];
+        if (config.enableProofreading && currentChapter.fallbackProofreadChunks) {
+            // Merge unique indices
+            currentChapter.fallbackProofreadChunks.forEach(idx => {
+                if (!chapterFallbacks.includes(idx)) chapterFallbacks.push(idx);
+            });
+        }
+        chapterFallbacks.sort((a, b) => a - b);
+
+        runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, chapterFallbacks, runningGlossary);
         
         if (!currentChapter.translatedMarkdown) {
              // If it was already translated, we might not count it as "just translated" depending on processChapter logic
@@ -1427,6 +1455,7 @@ const App: React.FC = () => {
                                                         onClick={() => {
                                                             // Sync detected fallbacks to the chapter object before retrying
                                                             chapter.fallbackChunks = detectedFallbacks;
+                                                            chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
                                                             // Ensure translatedChunks is at least pre-split if missing
                                                             if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
                                                                 chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
