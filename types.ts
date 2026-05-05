@@ -38,7 +38,6 @@ export enum AppStatus {
   IDLE = 'IDLE',
   PARSING = 'PARSING',
   TRANSLATING = 'TRANSLATING',
-  PROOFREADING = 'PROOFREADING',
   PACKAGING = 'PACKAGING',
   COMPLETED = 'COMPLETED',
   ERROR = 'ERROR',
@@ -54,7 +53,6 @@ export interface AppConfig {
   // Translation Settings
   sourceLanguage: string;
   systemInstruction: string;
-  proofreadInstruction: string;
   
   // Toggles
   enableProofreading: boolean;

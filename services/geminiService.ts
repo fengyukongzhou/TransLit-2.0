@@ -1,6 +1,16 @@
 
 import { AppConfig } from "../types";
-import { TRANSLATION_PROMPT_NOTES, TRANSLATION_PROMPT_GLOSSARY, GLOSSARY_OPTIMIZER_PROMPT, INCREMENTAL_GLOSSARY_OPTIMIZER_PROMPT } from "../prompts";
+import { 
+    TRANSLATION_PROMPT_NOTES, 
+    TRANSLATION_PROMPT_GLOSSARY_PRINCIPLES, 
+    GLOSSARY_OPTIMIZER_ALL_PROMPT,
+    GLOSSARY_OPTIMIZER_INCREMENTAL_PROMPT,
+    TWO_STEP_BASE_PROMPT,
+    FMT_ONE_STEP_GLOSSARY,
+    FMT_TWO_STEP_GLOSSARY,
+    FMT_TWO_STEP_NO_GLOSSARY,
+    FMT_ONE_STEP_NO_GLOSSARY
+} from "../prompts";
 
 export class AiService {
   // Safe chunk size to avoid context limits (approx 3000 chars)
@@ -16,7 +26,7 @@ export class AiService {
    */
   async optimizeGlossary(glossaryText: string): Promise<string> {
       try {
-          const result = await this.generate(`Current Glossary:\n${glossaryText}`, GLOSSARY_OPTIMIZER_PROMPT, 0.2);
+          const result = await this.generate(`Current Glossary:\n${glossaryText}`, GLOSSARY_OPTIMIZER_ALL_PROMPT, 0.2);
           return result.translation; // translation property holds the text
       } catch (error) {
           console.error("Glossary optimization API call failed:", error);
@@ -30,7 +40,7 @@ export class AiService {
   async optimizeIncrementalGlossary(newTermsText: string, masterGlossaryText: string): Promise<string> {
       try {
           const prompt = `MASTER GLOSSARY:\n${masterGlossaryText || "(Empty)"}\n\nNEW CANDIDATES:\n${newTermsText}`;
-          const result = await this.generate(prompt, INCREMENTAL_GLOSSARY_OPTIMIZER_PROMPT, 0.2);
+          const result = await this.generate(prompt, GLOSSARY_OPTIMIZER_INCREMENTAL_PROMPT, 0.2);
           return result.translation;
       } catch (error) {
           console.error("Incremental glossary optimization failed:", error);
@@ -85,8 +95,9 @@ export class AiService {
   /**
    * Splits text into manageable chunks.
    */
-  public splitTextIntoChunks(text: string): string[] {
-    if (!text || text.length <= this.CHUNK_SIZE) return [text];
+  public splitTextIntoChunks(text: string, customSize?: number): string[] {
+    const size = customSize || this.CHUNK_SIZE;
+    if (!text || text.length <= size) return [text];
 
     const chunks: string[] = [];
     let currentChunk = '';
@@ -94,27 +105,27 @@ export class AiService {
     const paragraphs = text.split(/\n\n/);
 
     for (const paragraph of paragraphs) {
-      if ((currentChunk.length + paragraph.length + 2) > this.CHUNK_SIZE) {
+      if ((currentChunk.length + paragraph.length + 2) > size) {
         if (currentChunk) {
           chunks.push(currentChunk);
           currentChunk = '';
         }
 
-        if (paragraph.length > this.CHUNK_SIZE) {
+        if (paragraph.length > size) {
            const lines = paragraph.split('\n');
            let currentLineChunk = '';
            
            for (const line of lines) {
-             if ((currentLineChunk.length + line.length + 1) > this.CHUNK_SIZE) {
+             if ((currentLineChunk.length + line.length + 1) > size) {
                 if (currentLineChunk) {
                     chunks.push(currentLineChunk);
                     currentLineChunk = '';
                 }
-                if (line.length > this.CHUNK_SIZE) {
+                if (line.length > size) {
                     let remaining = line;
                     while (remaining.length > 0) {
-                        chunks.push(remaining.substring(0, this.CHUNK_SIZE));
-                        remaining = remaining.substring(this.CHUNK_SIZE);
+                        chunks.push(remaining.substring(0, size));
+                        remaining = remaining.substring(size);
                     }
                 } else {
                     currentLineChunk = line;
@@ -410,7 +421,8 @@ export class AiService {
     fullPosteriorText: string = ""
   ): Promise<{ content: string; glossary: string }> {
     
-    const chunks = this.splitTextIntoChunks(content);
+    const customChunkSize = this.config.enableProofreading ? 1800 : this.CHUNK_SIZE;
+    const chunks = this.splitTextIntoChunks(content, customChunkSize);
     const translatedChunks: string[] = [...existingChunks];
 
     // Ensure array is large enough
@@ -420,10 +432,27 @@ export class AiService {
 
     let currentGlossary = initialGlossary;
 
-    const glossaryPart = this.config.enableGlossary ? `\n\n${TRANSLATION_PROMPT_GLOSSARY}` : '';
-    const formatInstruction = this.config.enableGlossary 
-        ? "IMPORTANT: Return results wrapped in <translation> and <glossary> tags as specified."
-        : "IMPORTANT: Return your translation wrapped in <translation> tags.";
+    const isCombinedMode = this.config.enableProofreading;
+    
+    let glossaryPart = '';
+    if (this.config.enableGlossary) {
+        glossaryPart = `\n\n${TRANSLATION_PROMPT_GLOSSARY_PRINCIPLES}`;
+    }
+
+    let formatInstruction = '';
+    if (isCombinedMode) {
+        if (this.config.enableGlossary) {
+            formatInstruction = FMT_TWO_STEP_GLOSSARY;
+        } else {
+            formatInstruction = FMT_TWO_STEP_NO_GLOSSARY;
+        }
+    } else {
+        if (this.config.enableGlossary) {
+            formatInstruction = FMT_ONE_STEP_GLOSSARY;
+        } else {
+            formatInstruction = FMT_ONE_STEP_NO_GLOSSARY;
+        }
+    }
 
     const baseSystemInstruction = `${systemInstruction}\n\n${TRANSLATION_PROMPT_NOTES}${glossaryPart}\n\n${formatInstruction}`;
 

@@ -308,18 +308,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
                         <FileCheck className="w-3.5 h-3.5 opacity-60 shrink-0" />
-                        <span className="text-sm font-semibold">AI Review</span>
+                        <span className="text-sm font-semibold">Two-Step</span>
                     </div>
-                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Proofreading</span>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Polished</span>
                 </div>
             </label>
 
-            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Skip Title Page, Copyright, TOC, etc.">
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Optimized for literary prose">
                 <div className="relative flex items-center shrink-0">
                     <input 
                         type="checkbox" 
-                        checked={config.smartSkip}
-                        onChange={(e) => handleChange('smartSkip', e.target.checked)}
+                        checked={config.useRecommendedPrompts}
+                        onChange={(e) => handleChange('useRecommendedPrompts', e.target.checked)}
                         disabled={disabled}
                         className="peer sr-only"
                     />
@@ -327,10 +327,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 </div>
                 <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
-                        <ScanEye className="w-3.5 h-3.5 opacity-60 shrink-0" />
-                        <span className="text-sm font-semibold">Auto Skip</span>
+                        <Sparkles className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">Lit Mode</span>
                     </div>
-                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Auto Filter</span>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Style Pros</span>
                 </div>
             </label>
 
@@ -354,12 +354,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 </div>
             </label>
 
-            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Optimized for literary prose">
+            <label className="flex items-center gap-3 p-3 rounded-xl bg-white border border-stone-100/50 shadow-sm hover:shadow-md hover:border-stone-200 transition-all cursor-pointer group min-h-[64px]" title="Skip Title Page, Copyright, TOC, etc.">
                 <div className="relative flex items-center shrink-0">
                     <input 
                         type="checkbox" 
-                        checked={config.useRecommendedPrompts}
-                        onChange={(e) => handleChange('useRecommendedPrompts', e.target.checked)}
+                        checked={config.smartSkip}
+                        onChange={(e) => handleChange('smartSkip', e.target.checked)}
                         disabled={disabled}
                         className="peer sr-only"
                     />
@@ -367,10 +367,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 </div>
                 <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-1.5 text-stone-700 group-hover:text-stone-900 transition-colors select-none">
-                        <Sparkles className="w-3.5 h-3.5 opacity-60 shrink-0" />
-                        <span className="text-sm font-semibold">Lit Mode</span>
+                        <ScanEye className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        <span className="text-sm font-semibold">Auto Skip</span>
                     </div>
-                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Style Pros</span>
+                    <span className="text-[10px] text-stone-400 font-medium uppercase tracking-tight truncate">Auto Filter</span>
                 </div>
             </label>
           </div>
@@ -393,36 +393,19 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                            <BookA className="w-3.5 h-3.5 text-stone-400"/> System Instruction
                         </label>
                         <textarea
-                            value={config.useRecommendedPrompts ? "Recommended prompts active. Custom instruction ignored." : config.systemInstruction}
+                            value={config.enableProofreading || config.useRecommendedPrompts ? "Optimized prompts active. Custom instruction ignored." : config.systemInstruction}
                             onChange={(e) => handleChange('systemInstruction', e.target.value)}
-                            disabled={disabled || config.useRecommendedPrompts}
+                            disabled={disabled || config.enableProofreading || config.useRecommendedPrompts}
                             rows={5}
                             className={`w-full px-4 py-3.5 text-xs md:text-sm rounded-2xl border focus:ring-2 focus:ring-stone-400 outline-none transition-all font-mono leading-relaxed resize-y
-                                ${config.useRecommendedPrompts 
+                                ${config.enableProofreading || config.useRecommendedPrompts 
                                     ? 'bg-[#f5f5f0] text-stone-400 border-stone-200 italic' 
                                     : 'bg-white border-stone-300 text-stone-700 focus:border-stone-500 shadow-sm'
                                 }`}
                         />
                     </div>
 
-                    {config.enableProofreading && (
-                        <div className="space-y-2.5">
-                            <label className="flex items-center gap-2 text-xs font-bold text-stone-600 uppercase tracking-wide">
-                                <FileText className="w-3.5 h-3.5 text-stone-400"/> Proofreading Instruction
-                            </label>
-                            <textarea
-                                value={config.useRecommendedPrompts ? "Recommended prompts active. Custom instruction ignored." : config.proofreadInstruction}
-                                onChange={(e) => handleChange('proofreadInstruction', e.target.value)}
-                                disabled={disabled || config.useRecommendedPrompts}
-                                rows={3}
-                                className={`w-full px-4 py-3.5 text-xs md:text-sm rounded-2xl border focus:ring-2 focus:ring-stone-400 outline-none transition-all font-mono leading-relaxed resize-y
-                                    ${config.useRecommendedPrompts 
-                                        ? 'bg-[#f5f5f0] text-stone-400 border-stone-200 italic' 
-                                        : 'bg-white border-stone-300 text-stone-700 focus:border-stone-500 shadow-sm'
-                                    }`}
-                            />
-                        </div>
-                    )}
+
                 </div>
             )}
         </div>

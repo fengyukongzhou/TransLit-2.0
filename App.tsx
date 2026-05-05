@@ -12,7 +12,7 @@ import { EpubService } from './services/epubService';
 import { AiService } from './services/geminiService';
 import { PersistenceService } from './services/persistenceService';
 import { AppStatus, AppConfig, Chapter, ProcessingLog, SessionState } from './types';
-import { RECOMMENDED_TRANSLATION_PROMPT, RECOMMENDED_PROOFREAD_PROMPT } from './prompts';
+import { RECOMMENDED_TRANSLATION_PROMPT, TWO_STEP_BASE_PROMPT } from './prompts';
 
 const DEFAULT_CONFIG: AppConfig = {
   apiKey: '',
@@ -20,7 +20,6 @@ const DEFAULT_CONFIG: AppConfig = {
   modelName: 'minimaxai/minimax-m2.1',
   sourceLanguage: 'English',
   systemInstruction: 'You are a professional translator. Translate the following content to Chinese, preserving the markdown format. For bold or italic text, use HTML tags (<b> and <i>) instead of Markdown asterisks (* or **).',
-  proofreadInstruction: 'Proofread the following text for grammar and flow. For bold or italic text, use HTML tags (<b> and <i>) instead of Markdown asterisks (* or **).',
   enableProofreading: true,
   useRecommendedPrompts: true,
   smartSkip: true,
@@ -89,7 +88,7 @@ const MarkdownImage: React.FC<{ src?: string, alt?: string, chapterPath: string,
     }, [src, chapterPath]);
 
     if (!src) return null;
-    if (isLoading) return <div className="w-full h-32 bg-stone-100 animate-pulse rounded-lg flex items-center justify-center text-stone-400 text-xs font-serif italic">Loading image...</div>;
+    if (isLoading) return <span className="w-full h-32 bg-stone-100 animate-pulse rounded-lg flex items-center justify-center text-stone-400 text-xs font-serif italic">Loading image...</span>;
     
     return (
         <img 
@@ -171,7 +170,7 @@ const App: React.FC = () => {
   const activeChapterIndexRef = useRef<number>(-1);
   const activeChunkIndexRef = useRef<number>(0);
 
-  const isWorking = [AppStatus.PARSING, AppStatus.TRANSLATING, AppStatus.PROOFREADING, AppStatus.PACKAGING].includes(status);
+  const isWorking = [AppStatus.PARSING, AppStatus.TRANSLATING, AppStatus.PACKAGING].includes(status);
 
   // Initialize Persistence
   useEffect(() => {
@@ -525,9 +524,7 @@ const App: React.FC = () => {
     aiService: AiService, 
     chapters: Chapter[], 
     effectiveSystemInstruction: string,
-    effectiveProofreadInstruction: string,
     forceTranslateIndices: number[] = [],
-    forceProofreadIndices: number[] = [],
     startGlossary: string = ""
   ): Promise<string> => {
     const chapter = chapters[index];
@@ -627,7 +624,8 @@ const App: React.FC = () => {
                       glossaryInfo = `(New Glossary: ${termCount} entries)`;
                   }
                   
-                  addLog(`  > Translated part ${current}/${total} of "${chapter.title}"... ${glossaryInfo}`, 'info');
+                  const actionWord = config.enableProofreading ? "Translated & Reviewed" : "Translated";
+                  addLog(`  > ${actionWord} part ${current}/${total} of "${chapter.title}"... ${glossaryInfo}`, 'info');
                   
                   // Trigger Glossary Cleaning every 10 chunks
                   chunksTranslatedTotalRef.current++;
@@ -660,51 +658,15 @@ const App: React.FC = () => {
         chapter.translatedMarkdown = result.content;
         chapter.glossary = result.glossary;
         currentGlossary = result.glossary;
+        
+        // If in combined mode, we treat the translation result as the proofread result too
+        if (config.enableProofreading) {
+            chapter.proofreadMarkdown = result.content;
+            chapter.proofreadChunks = [...(chapter.translatedChunks || [])];
+            chapter.fallbackProofreadChunks = [...(chapter.fallbackChunks || [])];
+        }
+
         updated = true;
-    }
-
-    // --- Proofreading ---
-    if (config.enableProofreading) {
-      if (chapter.proofreadMarkdown && forceProofreadIndices.length === 0) {
-          // Already proofread, move on
-      } else {
-          setStatus(AppStatus.PROOFREADING);
-          addLog(`Proofreading [${index+1}/${chapters.length}]: ${chapter.title}${forceProofreadIndices.length ? ' (Retrying failed parts)' : ''}`, "process");
-          
-          if (!chapter.proofreadChunks) chapter.proofreadChunks = [];
-          if (!chapter.fallbackProofreadChunks) chapter.fallbackProofreadChunks = [];
-
-          const proofread = await aiService.proofreadContent(
-              chapter.translatedMarkdown!, 
-              effectiveProofreadInstruction,
-              async (current, total, chunkResult, isFallback) => {
-                  if (isPauseRequested.current) {
-                      throw new Error("PAUSE_SIGNAL");
-                  }
-                  if (isFallback) {
-                    addLog(`  > ⚠️ API returned empty/error for part ${current}/${total} of "${chapter.title}".`, 'error');
-                    if (!chapter.fallbackProofreadChunks!.includes(current - 1)) {
-                        chapter.fallbackProofreadChunks!.push(current - 1);
-                    }
-                } else {
-                    addLog(`  > Proofread part ${current}/${total} of "${chapter.title}"...`, 'info');
-                    if (chapter.fallbackProofreadChunks) {
-                        chapter.fallbackProofreadChunks = chapter.fallbackProofreadChunks.filter(idx => idx !== current - 1);
-                    }
-                }
-                
-                if (chapter.proofreadChunks) {
-                    chapter.proofreadChunks![current - 1] = chunkResult;
-                    await persistenceService.current.updateChapter(chapter);
-                    await saveSessionState(AppStatus.PROOFREADING);
-                }
-            },
-            chapter.proofreadChunks,
-            forceProofreadIndices
-          );
-          chapter.proofreadMarkdown = proofread;
-          updated = true;
-      }
     }
 
     if (updated) {
@@ -713,7 +675,7 @@ const App: React.FC = () => {
     return currentGlossary;
   };
 
-  const handleRetryChapter = async (index: number, type: 'translate' | 'proofread') => {
+  const handleRetryChapter = async (index: number) => {
     if (status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED) return;
     
     try {
@@ -728,80 +690,58 @@ const App: React.FC = () => {
             const sourceChunks = aiService.splitTextIntoChunks(chapter.markdown);
             
             // Sync local fallbacks with detection if needed
-            if (type === 'translate') {
-                const explicit = chapter.fallbackChunks || [];
-                const implicit: number[] = [];
-                // If translatedMarkdown exists but chunks are missing/mismatched, scan by content
-                sourceChunks.forEach((sChunk, i) => {
-                    const trimmed = sChunk.trim();
-                    if (trimmed.length > 20 && chapter.translatedMarkdown?.includes(trimmed)) {
-                        implicit.push(i);
-                    }
-                });
-                chapter.fallbackChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
-                
-                // Re-initialize chunks array if it's stale/missing
-                if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
-                    chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
+            const explicit = chapter.fallbackChunks || [];
+            const implicit: number[] = [];
+            // If translatedMarkdown exists but chunks are missing/mismatched, scan by content
+            sourceChunks.forEach((sChunk, i) => {
+                const trimmed = sChunk.trim();
+                if (trimmed.length > 20 && chapter.translatedMarkdown?.includes(trimmed)) {
+                    implicit.push(i);
                 }
-            } else if (type === 'proofread') {
-                const explicit = chapter.fallbackProofreadChunks || [];
-                const implicit: number[] = [];
-                const tChunks = aiService.splitTextIntoChunks(chapter.translatedMarkdown || '');
-                tChunks.forEach((tChunk, i) => {
-                    const trimmed = tChunk.trim();
-                    if (trimmed.length > 20 && chapter.proofreadMarkdown?.includes(trimmed)) {
-                        implicit.push(i);
-                    }
-                });
-                chapter.fallbackProofreadChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
-                
-                // Re-initialize chunks array if it's stale/missing
-                if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== tChunks.length) {
-                    chapter.proofreadChunks = new Array(tChunks.length).fill(null);
-                }
+            });
+            chapter.fallbackChunks = [...new Set([...explicit, ...implicit])].sort((a,b) => a-b);
+            
+            // Re-initialize chunks array if it's stale/missing
+            if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
+                chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
             }
         }
 
         const localizedSource = getLocalizedSourceName(config.sourceLanguage);
-        const effectiveSystemInstruction = (config.useRecommendedPrompts 
-            ? RECOMMENDED_TRANSLATION_PROMPT
-            : config.systemInstruction).replace('[SOURCE_LANG]', localizedSource);
-            
-        const effectiveProofreadInstruction = config.useRecommendedPrompts
-            ? RECOMMENDED_PROOFREAD_PROMPT
-            : config.proofreadInstruction;
-
-        if (type === 'translate') {
-            const failedIndices = chapter.fallbackChunks || [];
-            // If still no failed indices, do we retry all? 
-            // Better to show an info log
-            if (failedIndices.length === 0 && chapter.translatedMarkdown) {
-                addLog(`Chapter "${chapter.title}" seems fully translated. Retrying the whole chapter for consistency...`, 'info');
-            }
-            
-            // Find most recent glossary before this chapter
-            let runningGlossary = "";
-            for (let j = index - 1; j >= 0; j--) {
-                if (chapters[j].glossary) {
-                    runningGlossary = chapters[j].glossary!;
-                    break;
-                }
-            }
-            
-            await processChapter(index, aiService, chapters, effectiveSystemInstruction, effectiveProofreadInstruction, failedIndices, [], runningGlossary);
+        let effectiveSystemInstruction = '';
+        if (config.enableProofreading) {
+            effectiveSystemInstruction = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+        } else if (config.useRecommendedPrompts) {
+            effectiveSystemInstruction = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
         } else {
-            const failedIndices = chapter.fallbackProofreadChunks || [];
-            await processChapter(index, aiService, chapters, effectiveSystemInstruction, effectiveProofreadInstruction, [], failedIndices);
+            effectiveSystemInstruction = config.systemInstruction.replace(/\[SOURCE_LANG\]/g, localizedSource);
+        }
+            
+        const failedIndices = chapter.fallbackChunks || [];
+        // If still no failed indices, do we retry all? 
+        // Better to show an info log
+        if (failedIndices.length === 0 && chapter.translatedMarkdown) {
+            addLog(`Chapter "${chapter.title}" seems fully translated. Retrying the whole chapter for consistency...`, 'info');
         }
         
+        // Find most recent glossary before this chapter
+        let runningGlossary = "";
+        for (let j = index - 1; j >= 0; j--) {
+            if (chapters[j].glossary) {
+                runningGlossary = chapters[j].glossary!;
+                break;
+            }
+        }
+        
+        await processChapter(index, aiService, chapters, effectiveSystemInstruction, failedIndices, runningGlossary);
+        
         // Update percentages
-        const totalSteps = chapters.length * (config.enableProofreading ? 2 : 1);
+        const isCombinedMode = config.enableProofreading;
+        const totalSteps = chapters.length;
         const stepsDoneCount = chapters.reduce((acc, c) => {
-            if (c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+            if (c.isSkippable) return acc + 1;
             const tDone = c.translatedMarkdown ? 1 : 0;
-            const pDone = (config.enableProofreading && c.proofreadMarkdown) ? 1 : 0;
-            return acc + tDone + pDone;
+            return acc + tDone;
         }, 0);
         const currentProgress = Math.min(100, (stepsDoneCount / totalSteps) * 100);
         setProgress(currentProgress);
@@ -908,7 +848,7 @@ const App: React.FC = () => {
   };
 
   const handlePause = () => {
-    if (status === AppStatus.TRANSLATING || status === AppStatus.PROOFREADING || status === AppStatus.PARSING) {
+    if (status === AppStatus.TRANSLATING ||  status === AppStatus.PARSING) {
         isPauseRequested.current = true;
         addLog("Pause requested. Finish current chapter and stopping...", "info");
     }
@@ -971,15 +911,17 @@ const App: React.FC = () => {
       }
 
       const localizedSource = getLocalizedSourceName(config.sourceLanguage);
-      const effectiveSystemInstruction = (config.useRecommendedPrompts 
-        ? RECOMMENDED_TRANSLATION_PROMPT
-        : config.systemInstruction).replace('[SOURCE_LANG]', localizedSource);
+      let effectiveSystemInstruction = '';
+      if (config.enableProofreading) {
+          effectiveSystemInstruction = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+      } else if (config.useRecommendedPrompts) {
+          effectiveSystemInstruction = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+      } else {
+          effectiveSystemInstruction = config.systemInstruction.replace(/\[SOURCE_LANG\]/g, localizedSource);
+      }
         
-      const effectiveProofreadInstruction = config.useRecommendedPrompts
-        ? RECOMMENDED_PROOFREAD_PROMPT
-        : config.proofreadInstruction;
-
-      addLog(`Starting translation using ${config.modelName}...`, "info");
+      const modelDisplay = config.enableProofreading ? `${config.modelName} (Two-Step)` : config.modelName;
+      addLog(`Starting translation using ${modelDisplay}...`, "info");
       
       let chaptersTranslatedCount = 0;
       
@@ -1011,7 +953,7 @@ const App: React.FC = () => {
             continue;
         }
 
-        runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, effectiveProofreadInstruction, [], [], runningGlossary);
+        runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, [], runningGlossary);
         
         if (!currentChapter.translatedMarkdown) {
              // If it was already translated, we might not count it as "just translated" depending on processChapter logic
@@ -1021,12 +963,11 @@ const App: React.FC = () => {
         addLog(`Finished Chapter ${i+1}`, "success");
         
         // Update progress
-        const currentTotalSteps = chaptersRef.current.length * (config.enableProofreading ? 2 : 1);
+        const currentTotalSteps = chaptersRef.current.length;
         const stepsDone = chaptersRef.current.reduce((acc, c) => {
-             if (c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+             if (c.isSkippable) return acc + 1;
              const tDone = c.translatedMarkdown ? 1 : 0;
-             const pDone = (config.enableProofreading && c.proofreadMarkdown) ? 1 : 0;
-             return acc + tDone + pDone;
+             return acc + tDone;
         }, 0);
         
         const newProgress = Math.min(100, (stepsDone / currentTotalSteps) * 100);
@@ -1116,12 +1057,12 @@ const App: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-3">
-            {restoredSession && status !== AppStatus.TRANSLATING && status !== AppStatus.PROOFREADING && (
+            {restoredSession && status !== AppStatus.TRANSLATING && (
                 <span className="text-xs text-amber-700 bg-amber-50 px-3 py-1.5 rounded-full border border-amber-200/60 flex items-center gap-1.5 font-medium shadow-sm">
                     <Save className="w-3.5 h-3.5" /> Session Restored
                 </span>
             )}
-            {downloadUrl && status !== AppStatus.TRANSLATING && status !== AppStatus.PROOFREADING && status !== AppStatus.PARSING && status !== AppStatus.PACKAGING && (
+            {downloadUrl && status !== AppStatus.TRANSLATING && status !== AppStatus.PARSING && status !== AppStatus.PACKAGING && (
             <a
                 href={downloadUrl}
                 download={currentFile?.name ? currentFile.name.replace(/\.epub$/i, '【TransLit】.epub') : 'book【TransLit】.epub'}
@@ -1205,7 +1146,7 @@ const App: React.FC = () => {
                     )}
 
                     {/* Pause Button */}
-                    {(status === AppStatus.TRANSLATING || status === AppStatus.PROOFREADING || status === AppStatus.PARSING) && (
+                    {(status === AppStatus.TRANSLATING ||  status === AppStatus.PARSING) && (
                         <button 
                             onClick={handlePause}
                             className="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-900 px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md flex items-center justify-center gap-2 border border-amber-200"
@@ -1304,7 +1245,7 @@ const App: React.FC = () => {
                      <span className="text-[10px] uppercase tracking-wider font-bold text-stone-200">
                         {status === AppStatus.PARSING ? 'Parsing' : 
                          status === AppStatus.TRANSLATING ? 'Translating' :
-                         status === AppStatus.PROOFREADING ? 'Proofreading' :
+                         
                          status === AppStatus.PACKAGING ? 'Packaging' : 'Working'}
                      </span>
                    </>
@@ -1382,28 +1323,8 @@ const App: React.FC = () => {
                             const detectedFallbacks = [...new Set([...explicitFallbacks, ...implicitFallbacks])].sort((a, b) => a - b);
                             const hasFallbacks = detectedFallbacks.length > 0;
                             
-                            // Similar logic for proofreading
-                            const explicitProofreadFallbacks = chapter.fallbackProofreadChunks || [];
-                            const implicitProofreadFallbacks: number[] = [];
-                            if (chapter.proofreadMarkdown && chapter.translatedMarkdown && chapter.fallbackProofreadChunks === undefined && !shouldSkipHeuristic) {
-                                 if (chapter.proofreadChunks && chapter.translatedChunks && chapter.proofreadChunks.length === chapter.translatedChunks.length) {
-                                    chapter.proofreadChunks.forEach((chunk, i) => {
-                                        if (chunk && chunk.trim() === chapter.translatedChunks![i].trim() && !explicitProofreadFallbacks.includes(i)) {
-                                            implicitProofreadFallbacks.push(i);
-                                        }
-                                    });
-                                 } else if (explicitProofreadFallbacks.length === 0) {
-                                    const tChunks = ai.splitTextIntoChunks(chapter.translatedMarkdown);
-                                    tChunks.forEach((tChunk, i) => {
-                                        const trimmed = tChunk.trim();
-                                        if (trimmed.length > 40 && chapter.proofreadMarkdown!.includes(trimmed)) {
-                                            implicitProofreadFallbacks.push(i);
-                                        }
-                                    });
-                                 }
-                            }
-                            
-                            const detectedProofreadFallbacks = [...new Set([...explicitProofreadFallbacks, ...implicitProofreadFallbacks])].sort((a, b) => a - b);
+                            // Simplified proofread checks for combined mode
+                            const detectedProofreadFallbacks = chapter.fallbackProofreadChunks || [];
                             const hasProofreadFallbacks = detectedProofreadFallbacks.length > 0;
 
                         const isDone = chapter.translatedMarkdown && (!config.enableProofreading || chapter.proofreadMarkdown);
@@ -1510,7 +1431,7 @@ const App: React.FC = () => {
                                                             if (!chapter.translatedChunks || chapter.translatedChunks.length !== sourceChunks.length) {
                                                                 chapter.translatedChunks = new Array(sourceChunks.length).fill(null);
                                                             }
-                                                            handleRetryChapter(idx, 'translate');
+                                                            handleRetryChapter(idx);
                                                         }}
                                                         disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
                                                         className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
@@ -1520,25 +1441,6 @@ const App: React.FC = () => {
                                                         }`}
                                                     >
                                                         <RefreshCw className="w-3 h-3" /> {hasFallbacks ? `Retry ${detectedFallbacks.length} Chunks` : 'Re-Translate'}
-                                                    </button>
-                                                )}
-                                                {config.enableProofreading && (hasProofreadFallbacks || ((chapter.proofreadMarkdown || chapter.translatedMarkdown) && !isWorking)) && (
-                                                     <button 
-                                                        onClick={() => {
-                                                            chapter.fallbackProofreadChunks = detectedProofreadFallbacks;
-                                                            if (!chapter.proofreadChunks || chapter.proofreadChunks.length !== (chapter.translatedChunks?.length || sourceChunks.length)) {
-                                                                chapter.proofreadChunks = new Array(sourceChunks.length).fill(null);
-                                                            }
-                                                            handleRetryChapter(idx, 'proofread');
-                                                        }}
-                                                        disabled={status !== AppStatus.IDLE && status !== AppStatus.ERROR && status !== AppStatus.COMPLETED}
-                                                        className={`text-[10px] px-2.5 py-1 rounded border transition-all flex items-center gap-1.5 disabled:opacity-50 shadow-sm ${
-                                                            hasProofreadFallbacks 
-                                                                ? 'bg-amber-600 hover:bg-amber-500 text-stone-950 border-amber-400 font-bold animate-pulse' 
-                                                                : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700 opacity-0 group-hover:opacity-100'
-                                                        }`}
-                                                    >
-                                                        <RefreshCw className="w-3 h-3" /> {hasProofreadFallbacks ? `Proof Retry ${detectedProofreadFallbacks.length}` : chapter.proofreadMarkdown ? 'Re-Proofread' : 'Start Proofread'}
                                                     </button>
                                                 )}
                                             </div>
