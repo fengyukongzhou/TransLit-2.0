@@ -70,47 +70,52 @@ export const TRANSLATION_PROMPT_GLOSSARY_PRINCIPLES = `
 
 // 格式约束：一步法翻译 + 无术语表
 export const FMT_ONE_STEP_NO_GLOSSARY = `
-**返回格式约束**：
-你必须严格按以下格式输出：
+### 结构化输出要求
+请严格遵循 XML 标签格式输出，不要包含任何前置或后置的对话性文本、提示语或多余头衔信息。
+
 <translation>
-[Markdown 翻译内容]
+在此处仅输出直接翻译后的纯正文目标语言内容。
 </translation>`;
 
 // 格式约束：一步法翻译 + 有术语表
 export const FMT_ONE_STEP_GLOSSARY = `
-**返回格式约束**：
-你必须严格按以下格式输出：
-- \`SOURCE: {原文} | TARGET: {译文}\`，仅在 <glossary> 标签内列出本段**新发现**且未在已知表中出现的上述高风险/专有条目。
-<translation>[Markdown 内容]
+### 结构化输出要求
+请严格遵循 XML 标签格式输出，不要包含任何前置或后置的对话性文本、提示语或多余头衔信息。
+
+<translation>
+在此处仅输出直接翻译后的纯正文目标语言内容。
 </translation>
 <glossary>
-SOURCE: [原文1] | TARGET:[译文1]
+只提取本段新发现且未在已知术语表中出现过的高风险/专有词汇。严禁发散。请严格遵循单行配对格式，若无新术语则留空该标签内心：
+SOURCE: 原文词汇 | TARGET: 译文对应词汇
 </glossary>`;
 
 // 格式约束：两步法翻译 + 无术语表
 export const FMT_TWO_STEP_NO_GLOSSARY = `
 ### 结构化输出要求
-你必须严格按以下格式输出：
+请严格遵循 XML 标签格式分块输出，确保结果纯粹干净。严禁以“第一步”、“第二步：最终审校润色...”类字眼作为小标题混入正文。
+
 <translation_draft>
-[第一步：初译内容]
+在此处仅输出第一步的初译正文内容。
 </translation_draft>
 <translation>
-[第二步：最终审校润色后的内容]
+在此处仅输出经过最终审校润色后的目标语言内容，不可包含任何说明性引导语或标注。
 </translation>`;
 
 // 格式约束：两步法翻译 + 有术语表
 export const FMT_TWO_STEP_GLOSSARY = `
 ### 结构化输出要求
-- \`SOURCE: {原文} | TARGET: {译文}\`，仅在 <glossary> 标签内列出本段**新发现**且未在已知表中出现的上述高风险/专有条目。
-你必须严格按以下格式输出：
+请严格遵循 XML 标签格式分块输出，确保结果纯粹干净。严禁以“第一步”、“第二步：最终审校润色...”类字眼作为小标题混入正文。
+
 <translation_draft>
-[第一步：初译内容]
+在此处仅输出第一步的初译正文内容。
 </translation_draft>
 <translation>
-[第二步：最终审校润色后的内容]
+在此处仅输出经过最终审校润色后的目标语言内容，不可包含任何说明性引导语或标注。
 </translation>
 <glossary>
-[若有提取的新术语，按照 SOURCE: 原文 | TARGET: 译文 的格式列出，否则留空]
+只提取本段新发现且未在已知术语表中出现过的高风险/专有词汇。严禁发散。请严格遵循单行配对格式，若无新术语则留空该标签内心：
+SOURCE: 原文词汇 | TARGET: 译文对应词汇
 </glossary>`;
 
 

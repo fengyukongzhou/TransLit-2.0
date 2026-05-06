@@ -381,7 +381,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 onClick={() => setShowPrompts(!showPrompts)}
                 className="flex items-center gap-3 text-xs font-bold text-stone-400 hover:text-stone-800 transition-colors mb-4 focus:outline-none group uppercase tracking-widest w-full"
             >
-                <span>Advanced Prompt Settings</span>
+                <span>Additional Context & Notes</span>
                 <div className="h-px bg-stone-200 flex-1 group-hover:bg-stone-300 transition-colors" />
                 {showPrompts ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
@@ -390,22 +390,20 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ config, setConfig, disabl
                 <div className="space-y-6 animate-in slide-in-from-top-2 duration-300">
                     <div className="space-y-2.5">
                         <label className="flex items-center gap-2 text-xs font-bold text-stone-600 uppercase tracking-wide">
-                           <BookA className="w-3.5 h-3.5 text-stone-400"/> System Instruction
+                           <BookA className="w-3.5 h-3.5 text-stone-400"/> Book Meta Info & Translation Notes
                         </label>
+                        <p className="text-[10px] text-stone-500 italic pb-1">
+                          Provide context like author, genre, style (e.g. "Hard-boiled"), or specific character names/title translations. This info is added to all translation modes.
+                        </p>
                         <textarea
-                            value={config.enableProofreading || config.useRecommendedPrompts ? "Optimized prompts active. Custom instruction ignored." : config.systemInstruction}
-                            onChange={(e) => handleChange('systemInstruction', e.target.value)}
-                            disabled={disabled || config.enableProofreading || config.useRecommendedPrompts}
+                            value={config.additionalContext}
+                            onChange={(e) => handleChange('additionalContext', e.target.value)}
+                            disabled={disabled}
+                            placeholder="Example: This is a cyberpunk novel by William Gibson. Use a gritty, tech-focused style. Translate 'The Sprawl' as '蔓延城'."
                             rows={5}
-                            className={`w-full px-4 py-3.5 text-xs md:text-sm rounded-2xl border focus:ring-2 focus:ring-stone-400 outline-none transition-all font-mono leading-relaxed resize-y
-                                ${config.enableProofreading || config.useRecommendedPrompts 
-                                    ? 'bg-[#f5f5f0] text-stone-400 border-stone-200 italic' 
-                                    : 'bg-white border-stone-300 text-stone-700 focus:border-stone-500 shadow-sm'
-                                }`}
+                            className="w-full px-4 py-3.5 text-xs md:text-sm rounded-2xl border bg-white border-stone-300 text-stone-700 focus:border-stone-500 focus:ring-2 focus:ring-stone-400 outline-none transition-all font-mono leading-relaxed resize-y shadow-sm"
                         />
                     </div>
-
-
                 </div>
             )}
         </div>

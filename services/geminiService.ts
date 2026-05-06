@@ -166,7 +166,14 @@ export class AiService {
     const glossaryMatch = clean.match(/<glossary>([\s\S]*?)<\/glossary>/i);
 
     if (translationMatch) {
-      const translation = translationMatch[1].trim();
+      let translation = translationMatch[1].trim();
+      
+      // Post-process: Remove common step headers that models might include inside the tag
+      // Matches things like: ### 第二步: ..., [第二步：...], **第二步** etc.
+      translation = translation.replace(/^(?:#+\s*|\*+|\[)?第二步[:：\s]*[^]*\n/i, '').trim();
+      // Also catch the specific user-reported string if it persists
+      translation = translation.replace(/^\[第二步：最终审校润色后的内容\]\s*\n?/i, '').trim();
+      
       const glossary = glossaryMatch ? glossaryMatch[1].trim() : undefined;
       return { translation, glossary };
     }

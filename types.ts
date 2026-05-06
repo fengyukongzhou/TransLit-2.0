@@ -52,7 +52,7 @@ export interface AppConfig {
   
   // Translation Settings
   sourceLanguage: string;
-  systemInstruction: string;
+  additionalContext: string;
   
   // Toggles
   enableProofreading: boolean;

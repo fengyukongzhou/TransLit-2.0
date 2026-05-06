@@ -19,7 +19,7 @@ const DEFAULT_CONFIG: AppConfig = {
   baseUrl: 'https://integrate.api.nvidia.com/v1',
   modelName: 'minimaxai/minimax-m2.1',
   sourceLanguage: 'English',
-  systemInstruction: 'You are a professional translator. Translate the following content to Chinese, preserving the markdown format. For bold or italic text, use HTML tags (<b> and <i>) instead of Markdown asterisks (* or **).',
+  additionalContext: '',
   enableProofreading: true,
   useRecommendedPrompts: true,
   smartSkip: true,
@@ -716,14 +716,19 @@ const App: React.FC = () => {
         }
 
         const localizedSource = getLocalizedSourceName(config.sourceLanguage);
-        let effectiveSystemInstruction = '';
+        let basePrompt = '';
         if (config.enableProofreading) {
-            effectiveSystemInstruction = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+            basePrompt = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
         } else if (config.useRecommendedPrompts) {
-            effectiveSystemInstruction = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+            basePrompt = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
         } else {
-            effectiveSystemInstruction = config.systemInstruction.replace(/\[SOURCE_LANG\]/g, localizedSource);
+            // Updated professional fallback prompt
+            basePrompt = `你是一位专业的文学翻译专家。请把${localizedSource}内容重写为中文，确保译文生动、地道，并保持原有的 Markdown 格式。`;
         }
+            
+        const effectiveSystemInstruction = config.additionalContext 
+            ? `${basePrompt}\n\n【书籍元信息与特定翻译要求】\n${config.additionalContext}`
+            : basePrompt;
             
         let failedIndices = [...(chapter.fallbackChunks || [])];
         if (config.enableProofreading && chapter.fallbackProofreadChunks) {
@@ -900,7 +905,7 @@ const App: React.FC = () => {
     }
   };
 
-  const startProcessing = async () => {
+  const startProcessing = async (mode: 'normal' | 'retry' = 'normal') => {
     if (!currentFile && !chaptersRef.current.length) return;
 
     try {
@@ -928,14 +933,19 @@ const App: React.FC = () => {
       }
 
       const localizedSource = getLocalizedSourceName(config.sourceLanguage);
-      let effectiveSystemInstruction = '';
+      let basePrompt = '';
       if (config.enableProofreading) {
-          effectiveSystemInstruction = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+          basePrompt = TWO_STEP_BASE_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
       } else if (config.useRecommendedPrompts) {
-          effectiveSystemInstruction = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
+          basePrompt = RECOMMENDED_TRANSLATION_PROMPT.replace(/\[SOURCE_LANG\]/g, localizedSource);
       } else {
-          effectiveSystemInstruction = config.systemInstruction.replace(/\[SOURCE_LANG\]/g, localizedSource);
+          // Updated professional fallback prompt
+          basePrompt = `你是一位专业的文学翻译专家。请把${localizedSource}内容重写为中文，确保译文生动、地道，并保持原有的 Markdown 格式。`;
       }
+        
+      const effectiveSystemInstruction = config.additionalContext 
+          ? `${basePrompt}\n\n【书籍元信息与特定翻译要求】\n${config.additionalContext}`
+          : basePrompt;
         
       const modelDisplay = config.enableProofreading ? `${config.modelName} (Two-Step)` : config.modelName;
       addLog(`Starting translation using ${modelDisplay}...`, "info");
@@ -970,16 +980,19 @@ const App: React.FC = () => {
             continue;
         }
 
-        // AUTO-RETRY logic: If chapter has fallbacks, include them in the indices to retry
-        // This makes the global "Retry Failed Chunks" button work as expected.
-        const chapterFallbacks = [...(currentChapter.fallbackChunks || [])];
-        if (config.enableProofreading && currentChapter.fallbackProofreadChunks) {
-            // Merge unique indices
-            currentChapter.fallbackProofreadChunks.forEach(idx => {
-                if (!chapterFallbacks.includes(idx)) chapterFallbacks.push(idx);
-            });
+        // AUTO-RETRY logic: Only retry if mode is explicitly 'retry'
+        // This follows user request: "Ignore failed parts, finish untouched first"
+        let chapterFallbacks: number[] = [];
+        if (mode === 'retry') {
+            chapterFallbacks = [...(currentChapter.fallbackChunks || [])];
+            if (config.enableProofreading && currentChapter.fallbackProofreadChunks) {
+                // Merge unique indices
+                currentChapter.fallbackProofreadChunks.forEach(idx => {
+                    if (!chapterFallbacks.includes(idx)) chapterFallbacks.push(idx);
+                });
+            }
+            chapterFallbacks.sort((a, b) => a - b);
         }
-        chapterFallbacks.sort((a, b) => a - b);
 
         runningGlossary = await processChapter(i, aiService, chaptersRef.current, effectiveSystemInstruction, chapterFallbacks, runningGlossary);
         
@@ -1045,27 +1058,17 @@ const App: React.FC = () => {
       );
 
       if (status === AppStatus.COMPLETED) {
-          if (hasAnyFallbacks) return "Retry Failed Chunks";
           if (hasPendingTranslation) return "Resume Translation";
           if (hasPendingProofread) return "Start Proofreading";
+          if (hasAnyFallbacks) return "Retry Failed Chunks";
           return "Package Again";
       }
       
-      if (status === AppStatus.ERROR) {
+      if (status === AppStatus.ERROR || status === AppStatus.PAUSED || status === AppStatus.IDLE) {
           if (hasPendingTranslation) return "Resume Translation";
           if (hasPendingProofread) return "Resume Proofreading";
           if (hasAnyFallbacks) return "Retry Failed Chunks";
-          return "Start Processing";
-      }
-
-      if (status === AppStatus.IDLE || status === AppStatus.PAUSED) {
-          if (chapters.length > 0) {
-              if (hasPendingTranslation) return "Resume Translation";
-              if (hasPendingProofread) return "Resume Proofreading";
-              if (hasAnyFallbacks) return "Retry Failed Chunks";
-              return "Package Again";
-          }
-          return "Start Translation";
+          return chapters.length > 0 ? "Package Again" : "Start Translation";
       }
       
       return "Start Processing";
@@ -1166,7 +1169,7 @@ const App: React.FC = () => {
                     {/* Start / Resume Button */}
                     {(status === AppStatus.IDLE || status === AppStatus.PAUSED) && (
                     <button
-                        onClick={startProcessing}
+                        onClick={() => startProcessing(getActionText().includes("Retry") ? "retry" : "normal")}
                         className="flex-1 bg-stone-800 hover:bg-stone-900 text-[#f5f5f0] px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5"
                     >
                         {getActionText()}
@@ -1186,7 +1189,7 @@ const App: React.FC = () => {
                     {/* Resume Button */}
                     {status === AppStatus.ERROR && (
                     <button
-                        onClick={startProcessing}
+                        onClick={() => startProcessing(getActionText().includes("Retry") ? "retry" : "normal")}
                         className="flex-1 bg-amber-700 hover:bg-amber-800 text-white px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5 flex items-center justify-center gap-2"
                     >
                         <RefreshCw className="w-4 h-4" /> {getActionText()}
@@ -1196,7 +1199,7 @@ const App: React.FC = () => {
                     {/* Restart Button (If Completed) */}
                      {status === AppStatus.COMPLETED && (
                         <button
-                            onClick={startProcessing}
+                            onClick={() => startProcessing(getActionText().includes("Retry") ? "retry" : "normal")}
                             className="flex-1 bg-stone-800 hover:bg-stone-900 text-[#f5f5f0] px-5 py-3.5 rounded-2xl text-sm font-medium transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5"
                         >
                             {getActionText()}
